@@ -7,6 +7,9 @@ contracts, tests, documentation, issues, and commits. Keep `README.md` as the
 verified human entrypoint and put detailed contracts and decisions under
 `docs/`.
 
+When introducing or revising domain concepts, follow the
+[shared domain naming convention](https://github.com/nisavid/dotfiles/blob/main/docs/research/CRYPTO_RELEASE_OPS_NAMING.md#domain-naming-convention).
+
 The repository is in a language-neutral genesis stage. Do not introduce a core
 implementation language, package coordinate, command grammar, wire schema, or
 adapter transport until the corresponding Wayfinder ticket settles it.
