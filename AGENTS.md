@@ -8,7 +8,7 @@ verified human entrypoint and put detailed contracts and decisions under
 `docs/`.
 
 When introducing or revising domain concepts, follow the
-[shared domain naming convention](https://github.com/nisavid/dotfiles/blob/e930853ab38f96abff76e00701aa5c269d306baf/docs/research/CRYPTO_RELEASE_OPS_NAMING.md#domain-naming-convention).
+[shared domain naming convention](https://github.com/nisavid/dotfiles/blob/main/docs/research/CRYPTO_RELEASE_OPS_NAMING.md#domain-naming-convention).
 
 The repository is in a language-neutral genesis stage. Do not introduce a core
 implementation language, package coordinate, command grammar, wire schema, or
