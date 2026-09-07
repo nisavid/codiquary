@@ -47,17 +47,17 @@ install or execute anything.
   possible effects without inventing hidden session authority.
 
 Codophylax is the public operator, with the future CLI/TUI command `cophax`
-(“co-fax”). The selected implementation is one root Rust 2024 package and
-library named `codiquary`. The
-[Rust build skeleton](https://github.com/nisavid/codiquary/issues/8) is the next
-implementation step; command grammar and wire schemas remain with their
-owning design tickets. Worker and documentation names remain unassigned.
+(“co-fax”). One root Rust 2024 package contains the `codiquary` library and
+`cophax` executable. Both are non-operational build placeholders: the library
+has no public API, and the command reports that it is not implemented and exits
+with failure. Command grammar and wire schemas remain with their owning design
+tickets. Worker and documentation names remain unassigned.
 
 ## Repository layout
 
 - [`contracts/`](contracts/) will contain normative serialized contracts and
   lifecycle rules.
-- [`src/`](src/) is reserved for the single primary core distribution.
+- [`src/`](src/) contains the single primary distribution's build placeholders.
 - [`adapters/`](adapters/) defines role-specific interfaces and reference
   implementations only where a real seam exists.
 - [`profiles/`](profiles/) contains complete public policy profiles without
@@ -71,7 +71,26 @@ owning design tickets. Worker and documentation names remain unassigned.
 - [`docs/`](docs/) contains architecture, decisions, provenance, and the future
   Diataxis documentation system.
 
-## Validate the scaffold
+## Build and validate the scaffold
+
+Install the exact toolchain selected by [`rust-toolchain.toml`](rust-toolchain.toml),
+then build and run the test harness without network access:
+
+```sh
+rustup toolchain install 1.98.1 --profile minimal --no-self-update
+cargo build --frozen
+cargo test --frozen
+```
+
+There are no dependencies or behavioral tests yet. `Cargo.lock` and the offline
+Cargo configuration are committed; a vendored source tree is needed only when
+actual dependencies are introduced. A successful test run currently reports
+zero tests and proves that the placeholder test harness builds and runs.
+
+The [Rust build workflow](.github/workflows/rust-build.yml) builds and runs that
+harness natively on Linux x86_64 GNU and macOS Apple Silicon, recording the
+actual compiler and runner versions. These are build checks, not minimum-OS
+qualification, reproducible-genesis evidence, or an authenticated release.
 
 Run the language-neutral repository checks:
 
