@@ -3,7 +3,7 @@
 Issues and Wayfinder maps live in this repository's GitHub Issues. Use the
 GitHub CLI for read and write operations.
 
-The [implementation map](https://github.com/nisavid/release-ops/issues/1) is the
+The [implementation map](https://github.com/nisavid/codiquary/issues/1) is the
 canonical route. Its child issues and native blocked-by relationships define the
 frontier. Claim a ticket by assigning it to the driving developer before work.
 Record a resolution comment, update the map's decision index when applicable,

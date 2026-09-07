@@ -10,9 +10,13 @@ verified human entrypoint and put detailed contracts and decisions under
 When introducing or revising domain concepts, follow the
 [shared domain naming convention](https://github.com/nisavid/dotfiles/blob/main/docs/research/CRYPTO_RELEASE_OPS_NAMING.md#domain-naming-convention).
 
-The repository is in a language-neutral genesis stage. Do not introduce a core
-implementation language, package coordinate, command grammar, wire schema, or
-adapter transport until the corresponding Wayfinder ticket settles it.
+The repository is a pre-implementation scaffold. The
+[substrate decision](https://github.com/nisavid/codiquary/issues/2) selects one
+root Rust 2024 package and library named `codiquary`, with `cophax` as the
+operator command. The
+[build-skeleton ticket](https://github.com/nisavid/codiquary/issues/8) owns the
+initial build code. Command grammar, wire schemas, and adapter transports
+remain with their corresponding Wayfinder decisions.
 
 ## Authority boundary
 
@@ -33,7 +37,7 @@ acceptance evidence belong to the system user.
 
 ## Issue tracker
 
-The [release-ops implementation map](https://github.com/nisavid/release-ops/issues/1)
+The [Codiquary implementation map](https://github.com/nisavid/codiquary/issues/1)
 and its native sub-issues and dependency edges are the source of truth. Claim a
 Wayfinder ticket before working it. Refer to tickets by their linked titles in
 human-facing prose.

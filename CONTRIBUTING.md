@@ -1,4 +1,4 @@
-# Contributing to release-ops
+# Contributing to Codiquary
 
 Contributions should leave the public source reviewable, reproducible, and
 explicit about what their evidence proves.

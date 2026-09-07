@@ -20,7 +20,7 @@ inputs, not production state and not authority to access a private deployment.
 
 ## Ownership transfer
 
-`release-ops` now owns the generic public contracts, core implementation,
+Codiquary owns the generic public contracts, core implementation,
 adapter interfaces and maintained reference adapters, public policy profiles,
 fixtures, conformance assets, qualification formats and records,
 documentation, governance, compatibility declarations, and releases.

@@ -2,14 +2,14 @@
 
 ## Supported versions
 
-`release-ops` has no released implementation or supported runtime yet. Security
+Codiquary has no released implementation or supported runtime yet. Security
 reports are accepted for every known repository revision, but acceptance does
 not promise a remediation deadline, backport, continued platform support, or a
 release. Historical revisions remain identifiable and are not silently changed.
 
 ## Report a vulnerability
 
-Use [GitHub private vulnerability reporting](https://github.com/nisavid/release-ops/security/advisories/new).
+Use [GitHub private vulnerability reporting](https://github.com/nisavid/codiquary/security/advisories/new).
 Do not open a public issue, pull request, or discussion for an undisclosed
 vulnerability.
 

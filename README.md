@@ -1,6 +1,6 @@
-# release-ops
+# Codiquary
 
-`release-ops` is the public, provider-neutral home of a reusable release
+Codiquary is the public, provider-neutral home of a reusable release
 operations system. It will provide the contracts and tooling needed to prepare,
 authorize, sign, publish, verify, withdraw, and recover software releases while
 keeping every authority boundary explicit and reviewable.
@@ -8,7 +8,7 @@ keeping every authority boundary explicit and reviewable.
 > [!IMPORTANT]
 > This repository is in its genesis stage. It has no released package, supported
 > runtime, production authority, signing key, provider binding, or trusted
-> deployment. The [implementation map](https://github.com/nisavid/release-ops/issues/1)
+> deployment. The [implementation map](https://github.com/nisavid/codiquary/issues/1)
 > is the source of truth for reaching the first authenticated self-release.
 
 ## Ownership boundary
@@ -46,8 +46,12 @@ install or execute anything.
 - **Operator tools** guide explicit stages and report denial, failure, or
   possible effects without inventing hidden session authority.
 
-The precise language, package coordinates, command grammar, and wire schemas
-remain open until their owning tickets settle them.
+Codophylax is the public operator, with the future CLI/TUI command `cophax`
+(“co-fax”). The selected implementation is one root Rust 2024 package and
+library named `codiquary`. The
+[Rust build skeleton](https://github.com/nisavid/codiquary/issues/8) is the next
+implementation step; command grammar and wire schemas remain with their
+owning design tickets. Worker and documentation names remain unassigned.
 
 ## Repository layout
 
