@@ -57,6 +57,6 @@ separate from a consumer's installation and execution authority.
 
 ## Current stage
 
-The repository is a policy-complete, pre-implementation scaffold. It contains no
-implementation, released package, production configuration, key, provider
-binding, or accepted release.
+The repository contains governance and a non-operational Rust build skeleton.
+It has no release-operations implementation, released package, production
+configuration, key, provider binding, or accepted release.
