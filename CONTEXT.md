@@ -1,11 +1,21 @@
-# Release operations context
+# Codiquary context
 
 ## Purpose
 
-`release-ops` defines a provider-neutral system for authorizing, publishing,
+Codiquary defines a provider-neutral system for authorizing, publishing,
 verifying, withdrawing, and recovering software releases. It keeps candidate
 construction separate from release authority and keeps generic verification
 separate from a consumer's installation and execution authority.
+
+## Project identity
+
+- **Codiquary**: the release-operations project for authenticated software
+  artifacts.
+- **Codophylax**: Codiquary's personified public operator across interfaces;
+  `cophax` (“co-fax”) is its prospective CLI/TUI command.
+- **Sacrysty**: the separate reusable cryptographic-operations project. Its
+  public operator is Sacrystan, with the prospective command `sacryd`
+  (“sacred”).
 
 ## Canonical model
 
@@ -47,6 +57,6 @@ separate from a consumer's installation and execution authority.
 
 ## Current stage
 
-The repository is a policy-complete, language-neutral scaffold. It contains no
+The repository is a policy-complete, pre-implementation scaffold. It contains no
 implementation, released package, production configuration, key, provider
 binding, or accepted release.

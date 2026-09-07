@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document governs the public `release-ops` contracts, implementation,
+This document governs the public Codiquary contracts, implementation,
 adapters, profiles, fixtures, conformance and qualification assets,
 documentation, and releases. It grants no authority over a system user's
 private deployment or production release operations.
