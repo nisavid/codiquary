@@ -1,14 +1,16 @@
 # RFC 9980 TUF Rust prototype
 
-This throwaway prototype signs and verifies canonical TUF root metadata with one
-OpenPGP v6 algorithm-30 composite signature. The tested verifier rejects damage
-to either the Ed25519 or ML-DSA-65 component. Across root and delegated-targets
-verification, one verified composite signing-key fingerprint contributes at
-most once to a signature threshold even when authorized key objects have
-different correctly derived TUF key IDs. Undefined fields on the provisional
-OpenPGP key object or its `keyval` are rejected before Root or Delegations
-metadata is accepted, including when the key is unused. Direct verification of
-programmatically constructed keys applies the same check.
+This throwaway prototype signs and verifies a synthetic TUF metadata chain with
+one OpenPGP v6 algorithm-30 composite signature. The tested verifier rejects
+damage to either the Ed25519 or ML-DSA-65 component. Across root and
+delegated-targets verification, one verified composite signing-key fingerprint
+contributes at most once to a signature threshold even when authorized key
+objects have different correctly derived TUF key IDs. Undefined fields on the
+provisional OpenPGP key object or its `keyval` are rejected before Root or
+Delegations metadata is accepted, including when the key is unused. The
+all-role fixture binds serialized role bytes through snapshot and timestamp
+Metafiles and traverses a delegated hashed target. The experimental profile
+fixture is documented in [evidence/experimental-profile.md](evidence/experimental-profile.md).
 
 > [!CAUTION]
 > This is one synthetic publisher/verifier seam, not a production security
@@ -21,9 +23,9 @@ OpenPGP verifier ignored fields that changed that ID. The revised patch returns
 a domain-separated threshold identity from signature verification. Existing key
 types retain TUF-key-ID identity; this provisional OpenPGP profile uses the
 verified v6 signing-key fingerprint. Root and delegation verifiers count each
-identity once. This is the proposed correction, pending a new independent
-review; it is not an operator, custody, or underlying-component independence
-claim.
+identity once. This correction is covered by the current all-role fixture and
+independent bounded review; it is not an operator, custody, or underlying-
+component independence claim.
 
 A second independent review found that the undefined-field check still ran
 only for a key selected to verify a signature. The current patch moves that
@@ -31,8 +33,8 @@ profile validation to the shared metadata key-map deserializer and retains it
 in direct verification. The correction has new reproducible red/green
 evidence. The applicable pinned Tough default suite now passes, and two focused
 ECDSA regressions exercise the conventional `Key::verify` identity through
-both public threshold loops. This compatibility correction still awaits
-independent review; see the
+both public threshold loops. This compatibility correction is included in the
+current reviewed fixture; see the
 [current compatibility record](evidence/current-compatibility.md).
 
 The current prototype and Tough results were observed on
@@ -210,8 +212,8 @@ the host denied Bubblewrap's `NETLINK_ROUTE` socket. The recorded green run used
 network access. Use that substitution only after independently verifying the
 parent network denial; otherwise the replay prerequisite is unsatisfied.
 
-The test should report nine passing integration tests: the seven existing
-composite and profile-boundary tests plus two focused conventional ECDSA tests.
+The test should report eleven passing integration tests, including the
+deterministic experimental-profile and all-role metadata-chain fixtures.
 Its generated key ID and fingerprint vary by run. Compare the stable format and
 rejection assertions with the
 [current compatibility record](evidence/current-compatibility.md). The
@@ -273,10 +275,11 @@ compatibility record binds the exact command and outputs by SHA-256.
 
 ## Scope
 
-This slice covers the root publisher/verifier seam and the composite
-threshold-identity boundary in root and delegation verification. The delegation
-test is a direct `Delegations::verify_role` seam, not an all-role repository
-qualification. The slice does not qualify targets, snapshot, timestamp, full
-delegated-targets behavior, root rotation, durable refresh or crash recovery,
-caller-supplied accepted time, target confinement, metadata limits, held-byte
-policy composition, the POUF draft, or any operator/custody independence claim.
+The current fixture covers the root publisher/verifier seam, the composite
+threshold-identity boundary in root and delegation verification, all four
+top-level role shapes, one delegated role with a hashed target, serialized
+snapshot/timestamp references, and a deterministic experimental profile shape.
+It does not decide lifecycle policy: expiry, rollback, accepted time, root
+bootstrap, consistent snapshots, durable refresh or crash recovery, target
+confinement, metadata limits, held-byte policy composition, consumer transport,
+macOS qualification, or operator/custody independence remain later work.

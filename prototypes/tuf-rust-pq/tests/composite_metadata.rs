@@ -3,7 +3,7 @@ use aws_lc_rs::digest::{digest, SHA256};
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use sequoia_openpgp as openpgp;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU64;
@@ -798,6 +798,85 @@ fn metafile(bytes: &[u8]) -> Metafile {
         version: NonZeroU64::new(1).unwrap(),
         _extra: HashMap::new(),
     }
+}
+
+fn experimental_profile() -> BTreeMap<&'static str, serde_json::Value> {
+    BTreeMap::from([
+        ("canonicalization", serde_json::json!("tuf-canonical-json")),
+        ("digest_algorithm", serde_json::json!("sha512")),
+        (
+            "lifecycle_fog",
+            serde_json::json!([
+                "accepted_time",
+                "consistent_snapshot",
+                "expiry",
+                "root_bootstrap",
+                "rollback",
+            ]),
+        ),
+        (
+            "openpgp_profile",
+            serde_json::json!({
+                "certificate_version": 6,
+                "signature_algorithm": 30,
+                "signature_hash": "sha512",
+            }),
+        ),
+        (
+            "signature_components",
+            serde_json::json!(["ed25519", "ml-dsa-65"]),
+        ),
+        (
+            "signature_scheme",
+            serde_json::json!("openpgp-v6-algorithm-30-ed25519+mldsa65"),
+        ),
+        ("tuf_spec_version", serde_json::json!("1.0.36")),
+        (
+            "threshold_identity",
+            serde_json::json!("verified-openpgp-v6-signing-key-fingerprint"),
+        ),
+    ])
+}
+
+fn validate_experimental_profile(
+    profile: &BTreeMap<&'static str, serde_json::Value>,
+) -> Result<(), &'static str> {
+    const REQUIRED: [&str; 8] = [
+        "canonicalization",
+        "digest_algorithm",
+        "lifecycle_fog",
+        "openpgp_profile",
+        "signature_components",
+        "signature_scheme",
+        "threshold_identity",
+        "tuf_spec_version",
+    ];
+    if profile.keys().any(|key| !REQUIRED.contains(key)) {
+        return Err("undefined profile field");
+    }
+    if REQUIRED.iter().any(|key| !profile.contains_key(key)) {
+        return Err("missing profile field");
+    }
+    Ok(())
+}
+
+#[test]
+fn experimental_profile_is_deterministic_and_closed() -> openpgp::Result<()> {
+    let profile = experimental_profile();
+    validate_experimental_profile(&profile).expect("evidenced profile must validate");
+    let canonical = serde_json::to_vec(&profile)?;
+    assert_eq!(
+        canonical,
+        br#"{"canonicalization":"tuf-canonical-json","digest_algorithm":"sha512","lifecycle_fog":["accepted_time","consistent_snapshot","expiry","root_bootstrap","rollback"],"openpgp_profile":{"certificate_version":6,"signature_algorithm":30,"signature_hash":"sha512"},"signature_components":["ed25519","ml-dsa-65"],"signature_scheme":"openpgp-v6-algorithm-30-ed25519+mldsa65","threshold_identity":"verified-openpgp-v6-signing-key-fingerprint","tuf_spec_version":"1.0.36"}"#
+    );
+
+    let mut malformed = profile;
+    malformed.insert("expiry_policy", serde_json::json!("safe"));
+    assert_eq!(
+        validate_experimental_profile(&malformed),
+        Err("undefined profile field")
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
