@@ -777,9 +777,27 @@ where
 {
     root.verify_role(signed).unwrap();
 
-    let mut corrupted = signed.clone();
-    corrupted.signatures[0].sig = corrupt_component(&signed.signatures[0].sig, 1).into();
-    assert!(root.verify_role(&corrupted).is_err());
+    for from_end in [
+        1,
+        ED25519_SIGNATURE_BYTES + ML_DSA_65_SIGNATURE_BYTES,
+        ML_DSA_65_SIGNATURE_BYTES,
+    ] {
+        let mut corrupted = signed.clone();
+        corrupted.signatures[0].sig = corrupt_component(&signed.signatures[0].sig, from_end).into();
+        assert!(root.verify_role(&corrupted).is_err());
+    }
+}
+
+fn metafile(bytes: &[u8]) -> Metafile {
+    Metafile {
+        length: Some(bytes.len() as u64),
+        hashes: Some(Hashes {
+            sha256: digest(&SHA256, bytes).as_ref().to_vec().into(),
+            _extra: HashMap::new(),
+        }),
+        version: NonZeroU64::new(1).unwrap(),
+        _extra: HashMap::new(),
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -802,7 +820,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         roles,
         _extra: HashMap::new(),
     };
-    let key_sources: Vec<Box<dyn KeySource>> = vec![Box::new(signer)];
+    let key_sources: Vec<Box<dyn KeySource>> = vec![Box::new(signer.clone())];
     let rng = SystemRandom::new();
 
     let role_name = "delegated";
@@ -818,28 +836,26 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         }],
     };
     let artifact = b"codiquary issue 20 fixture\n";
+    let artifact_target = Target {
+        length: artifact.len() as u64,
+        hashes: Hashes {
+            sha256: digest(&SHA256, artifact).as_ref().to_vec().into(),
+            _extra: HashMap::new(),
+        },
+        custom: HashMap::new(),
+        _extra: HashMap::new(),
+    };
     let top_targets = Targets {
         spec_version: "1.0.36".to_owned(),
         version: NonZeroU64::new(1).unwrap(),
         expires: "2999-01-01T00:00:00Z".parse().unwrap(),
-        targets: HashMap::from([(
-            TargetName::new("artifact.bin")?,
-            Target {
-                length: artifact.len() as u64,
-                hashes: Hashes {
-                    sha256: digest(&SHA256, artifact).as_ref().to_vec().into(),
-                    _extra: HashMap::new(),
-                },
-                custom: HashMap::new(),
-                _extra: HashMap::new(),
-            },
-        )]),
+        targets: HashMap::new(),
         delegations: Some(delegations.clone()),
         _extra: HashMap::new(),
     };
 
     let signed_targets = SignedRole::new(
-        top_targets,
+        top_targets.clone(),
         &KeyHolder::Root(root.clone()),
         &key_sources,
         &rng,
@@ -847,84 +863,114 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     .await?;
     assert_top_level_role_verified(&root, signed_targets.signed());
 
+    let delegated_targets = DelegatedTargets {
+        name: role_name.to_owned(),
+        targets: Targets {
+            spec_version: "1.0.36".to_owned(),
+            version: NonZeroU64::new(1).unwrap(),
+            expires: "2999-01-01T00:00:00Z".parse().unwrap(),
+            targets: HashMap::from([(TargetName::new("artifact.bin")?, artifact_target)]),
+            delegations: None,
+            _extra: HashMap::new(),
+        },
+    };
+    let signed_delegated = SignedRole::new(
+        delegated_targets.clone(),
+        &KeyHolder::Delegations(delegations.clone()),
+        &key_sources,
+        &rng,
+    )
+    .await?;
+    let delegated_targets_bytes = signed_delegated.buffer().clone();
+    let reparsed_delegated: Signed<DelegatedTargets> =
+        serde_json::from_slice(&delegated_targets_bytes)?;
+    let (_, reparsed_role) = reparsed_delegated.targets();
+    delegations.verify_role(&reparsed_role, role_name)?;
+    let delegated_signed = signed_delegated.signed().clone().targets().1;
+    delegations.verify_role(&delegated_signed, role_name)?;
+    for from_end in [
+        1,
+        ED25519_SIGNATURE_BYTES + ML_DSA_65_SIGNATURE_BYTES,
+        ML_DSA_65_SIGNATURE_BYTES,
+    ] {
+        let mut corrupted_delegated = delegated_signed.clone();
+        corrupted_delegated.signatures[0].sig =
+            corrupt_component(&delegated_signed.signatures[0].sig, from_end).into();
+        delegations
+            .verify_role(&corrupted_delegated, role_name)
+            .expect_err("delegated targets must reject a corrupted composite signature");
+    }
+
+    let signed_targets_bytes = signed_targets.buffer().clone();
+    let reparsed_targets: Signed<Targets> = serde_json::from_slice(&signed_targets_bytes)?;
+    root.verify_role(&reparsed_targets)?;
     let snapshot = Snapshot {
         spec_version: "1.0.36".to_owned(),
         version: NonZeroU64::new(1).unwrap(),
         expires: "2999-01-01T00:00:00Z".parse().unwrap(),
         meta: HashMap::from([
-            (
-                "1.targets.json".to_owned(),
-                Metafile {
-                    length: None,
-                    hashes: None,
-                    version: NonZeroU64::new(1).unwrap(),
-                    _extra: HashMap::new(),
-                },
-            ),
+            ("targets.json".to_owned(), metafile(&signed_targets_bytes)),
             (
                 "delegated.json".to_owned(),
-                Metafile {
-                    length: None,
-                    hashes: None,
-                    version: NonZeroU64::new(1).unwrap(),
-                    _extra: HashMap::new(),
-                },
+                metafile(&delegated_targets_bytes),
             ),
         ]),
         _extra: HashMap::new(),
     };
-    let signed_snapshot =
-        SignedRole::new(snapshot, &KeyHolder::Root(root.clone()), &key_sources, &rng).await?;
+    let signed_snapshot = SignedRole::new(
+        snapshot.clone(),
+        &KeyHolder::Root(root.clone()),
+        &key_sources,
+        &rng,
+    )
+    .await?;
     assert_top_level_role_verified(&root, signed_snapshot.signed());
+    let snapshot_bytes = signed_snapshot.buffer().clone();
+    let reparsed_snapshot: Signed<Snapshot> = serde_json::from_slice(&snapshot_bytes)?;
+    root.verify_role(&reparsed_snapshot)?;
 
     let mut timestamp = Timestamp::new(
         "1.0.36".to_owned(),
         NonZeroU64::new(1).unwrap(),
         "2999-01-01T00:00:00Z".parse().unwrap(),
     );
-    timestamp.meta.insert(
-        "1.snapshot.json".to_owned(),
-        Metafile {
-            length: None,
-            hashes: None,
-            version: NonZeroU64::new(1).unwrap(),
-            _extra: HashMap::new(),
-        },
-    );
+    timestamp
+        .meta
+        .insert("snapshot.json".to_owned(), metafile(&snapshot_bytes));
     let signed_timestamp = SignedRole::new(
-        timestamp,
+        timestamp.clone(),
         &KeyHolder::Root(root.clone()),
         &key_sources,
         &rng,
     )
     .await?;
     assert_top_level_role_verified(&root, signed_timestamp.signed());
+    let reparsed_timestamp: Signed<Timestamp> = serde_json::from_slice(signed_timestamp.buffer())?;
+    root.verify_role(&reparsed_timestamp)?;
 
-    let signed_delegated = SignedRole::new(
-        DelegatedTargets {
-            name: role_name.to_owned(),
-            targets: Targets {
-                spec_version: "1.0.36".to_owned(),
-                version: NonZeroU64::new(1).unwrap(),
-                expires: "2999-01-01T00:00:00Z".parse().unwrap(),
-                targets: HashMap::new(),
-                delegations: None,
-                _extra: HashMap::new(),
-            },
-        },
-        &KeyHolder::Delegations(delegations.clone()),
-        &key_sources,
-        &rng,
-    )
-    .await?;
-    let delegated_signed = signed_delegated.signed().clone().targets().1;
-    delegations.verify_role(&delegated_signed, role_name)?;
-    let mut corrupted_delegated = delegated_signed.clone();
-    corrupted_delegated.signatures[0].sig =
-        corrupt_component(&delegated_signed.signatures[0].sig, 1).into();
-    delegations
-        .verify_role(&corrupted_delegated, role_name)
-        .expect_err("delegated targets must reject a corrupted composite signature");
+    let mut linked_delegations = delegations;
+    linked_delegations.roles[0].targets = Some(delegated_signed);
+    let mut linked_targets = signed_targets.signed().clone();
+    linked_targets.signed.delegations = Some(linked_delegations);
+    assert_eq!(
+        linked_targets
+            .signed
+            .find_target(&TargetName::new("artifact.bin")?, false)?
+            .length,
+        artifact.len() as u64
+    );
+
+    let expected_canonical = vec![
+        top_targets.canonical_form()?,
+        delegated_targets.canonical_form()?,
+        snapshot.canonical_form()?,
+        timestamp.canonical_form()?,
+    ];
+    assert_eq!(
+        signer.signed_messages.lock().unwrap().as_slice(),
+        expected_canonical.as_slice(),
+        "each role must be signed over its canonical TUF bytes"
+    );
 
     Ok(())
 }
