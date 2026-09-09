@@ -112,7 +112,9 @@ versions and executable-file SHA-256 values are:
 The host supplied OpenSSL 3.6.3 on `x86_64-unknown-linux-gnu`. Bubblewrap used
 `--unshare-all`; the parent and sandbox network namespace identifiers differed.
 Only the disposable Cargo home, target, and temporary directories were
-writable. No `HOME` setting or fourth writable directory was used.
+writable host-backed paths whose writes persisted outside the sandbox.
+Bubblewrap also mounted private `/dev` and `/proc`; no `HOME` setting or fourth
+writable host-backed path was used.
 
 No Tough feature was enabled. The `http`, `http2`, `integ`, and `fips` feature
 profiles were excluded. The zero-test HTTP target did not exercise HTTP

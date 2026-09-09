@@ -229,9 +229,10 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all \
 The maintenance probe and replay succeeded with `--unshare-all`; the parent and
 sandbox network namespace identifiers differed. The command below gives the
 source a read-only view of the host, makes only the three disposable directories
-writable, starts with an empty environment, selects Cargo, rustc, and rustdoc by
-resolved toolchain path, and runs from the pre-fetched cache without network
-access:
+writable as host-backed paths whose writes persist outside the sandbox, mounts
+private `/dev` and `/proc`, starts with an empty environment, selects Cargo,
+rustc, and rustdoc by resolved toolchain path, and runs from the pre-fetched
+cache without network access:
 
 ```sh
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all \
