@@ -195,59 +195,7 @@ pub fn parse_experimental_profile(bytes: &[u8]) -> Result<ExperimentalProfile, P
 
 impl ExperimentalProfile {
     fn validate(&self) -> Result<(), ProfileError> {
-        if self.openpgp.certificate_primary_key_algorithm != 30 {
-            return Err(ProfileError::Invalid(
-                "certificate primary-key algorithm must be 30",
-            ));
-        }
-        if self.openpgp.certificate_primary_key_version != 6 {
-            return Err(ProfileError::Invalid(
-                "certificate primary-key version must be 6",
-            ));
-        }
-        if self.openpgp.eligible_signing_key_algorithm != 30 {
-            return Err(ProfileError::Invalid(
-                "eligible signing-key algorithm must be 30",
-            ));
-        }
-        if self.openpgp.eligible_signing_key_version != 6 {
-            return Err(ProfileError::Invalid(
-                "eligible signing-key version must be 6",
-            ));
-        }
-        if self.openpgp.issuer_fingerprints != 1 {
-            return Err(ProfileError::Invalid(
-                "exactly one issuer fingerprint is required",
-            ));
-        }
-        if self.openpgp.eligible_signing_keys != 1 {
-            return Err(ProfileError::Invalid(
-                "exactly one eligible signing key is required",
-            ));
-        }
-        if self.openpgp.signature_packet_algorithm != 30 {
-            return Err(ProfileError::Invalid(
-                "signature-packet algorithm must be 30",
-            ));
-        }
-        if self.openpgp.signature_type != 0 {
-            return Err(ProfileError::Invalid("signature type must be binary (0)"));
-        }
-        if self.openpgp.signature_packets != 1 {
-            return Err(ProfileError::Invalid(
-                "exactly one signature packet is required",
-            ));
-        }
-        if self.openpgp.signature_packet_version != 6 {
-            return Err(ProfileError::Invalid("signature-packet version must be 6"));
-        }
-        if self.openpgp.signature_components
-            != [SignatureComponent::Ed25519, SignatureComponent::MlDsa65]
-        {
-            return Err(ProfileError::Invalid(
-                "signature components must be Ed25519 and ML-DSA-65",
-            ));
-        }
+        self.openpgp.validate()?;
         if self.lifecycle_fog
             != [
                 LifecycleQuestion::AcceptedTime,
@@ -260,6 +208,63 @@ impl ExperimentalProfile {
         {
             return Err(ProfileError::Invalid(
                 "lifecycle fog must list each unresolved question once",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl OpenPgpProfile {
+    fn validate(&self) -> Result<(), ProfileError> {
+        if self.certificate_primary_key_algorithm != 30 {
+            return Err(ProfileError::Invalid(
+                "certificate primary-key algorithm must be 30",
+            ));
+        }
+        if self.certificate_primary_key_version != 6 {
+            return Err(ProfileError::Invalid(
+                "certificate primary-key version must be 6",
+            ));
+        }
+        if self.eligible_signing_key_algorithm != 30 {
+            return Err(ProfileError::Invalid(
+                "eligible signing-key algorithm must be 30",
+            ));
+        }
+        if self.eligible_signing_key_version != 6 {
+            return Err(ProfileError::Invalid(
+                "eligible signing-key version must be 6",
+            ));
+        }
+        if self.issuer_fingerprints != 1 {
+            return Err(ProfileError::Invalid(
+                "exactly one issuer fingerprint is required",
+            ));
+        }
+        if self.eligible_signing_keys != 1 {
+            return Err(ProfileError::Invalid(
+                "exactly one eligible signing key is required",
+            ));
+        }
+        if self.signature_packet_algorithm != 30 {
+            return Err(ProfileError::Invalid(
+                "signature-packet algorithm must be 30",
+            ));
+        }
+        if self.signature_type != 0 {
+            return Err(ProfileError::Invalid("signature type must be binary (0)"));
+        }
+        if self.signature_packets != 1 {
+            return Err(ProfileError::Invalid(
+                "exactly one signature packet is required",
+            ));
+        }
+        if self.signature_packet_version != 6 {
+            return Err(ProfileError::Invalid("signature-packet version must be 6"));
+        }
+        if self.signature_components != [SignatureComponent::Ed25519, SignatureComponent::MlDsa65] {
+            return Err(ProfileError::Invalid(
+                "signature components must be Ed25519 and ML-DSA-65",
             ));
         }
         Ok(())
