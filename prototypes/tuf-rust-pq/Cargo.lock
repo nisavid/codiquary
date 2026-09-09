@@ -1694,6 +1694,7 @@ dependencies = [
  "async-trait",
  "aws-lc-rs",
  "sequoia-openpgp",
+ "serde",
  "serde_json",
  "tokio",
  "tough",

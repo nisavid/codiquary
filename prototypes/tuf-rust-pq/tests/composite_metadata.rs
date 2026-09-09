@@ -3,7 +3,7 @@ use aws_lc_rs::digest::{digest, SHA256};
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use sequoia_openpgp as openpgp;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU64;
@@ -26,6 +26,12 @@ use tough::schema::{
 };
 use tough::sign::Sign;
 use tough::TargetName;
+use tuf_rust_pq_prototype::experimental_profile::{
+    parse_experimental_profile, Canonicalization, ClosedExtensionHandling, DescriptorHash,
+    DescriptorRequirement, DescriptorRules, OpenPgpKeyType, SignatureComponent, SignatureHash,
+    SignatureScheme, TargetCustomHandling, ThresholdIdentity, TufSpecVersion,
+    EXPERIMENTAL_PROFILE_JSON,
+};
 
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const ML_DSA_65_SIGNATURE_BYTES: usize = 3309;
@@ -194,6 +200,15 @@ fn with_ecdsa_compatibility_extension(mut key: Key) -> Key {
 #[tokio::test(flavor = "current_thread")]
 async fn root_rejects_undefined_openpgp_extensions(
 ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    let profile = parse_experimental_profile(EXPERIMENTAL_PROFILE_JSON.as_bytes())?;
+    assert_eq!(
+        profile.extensions.openpgp_key,
+        ClosedExtensionHandling::RejectUndefined
+    );
+    assert_eq!(
+        profile.extensions.openpgp_keyval,
+        ClosedExtensionHandling::RejectUndefined
+    );
     let signer = CompositeSigner::generate()?;
     let key = signer.tuf_key();
     let invalid_keys = [
@@ -543,6 +558,11 @@ async fn delegations_reject_unused_undefined_openpgp_extensions(
 
 #[tokio::test(flavor = "current_thread")]
 async fn root_rejects_distinct_tuf_ids_for_one_composite_signing_key() -> openpgp::Result<()> {
+    let profile = parse_experimental_profile(EXPERIMENTAL_PROFILE_JSON.as_bytes())?;
+    assert_eq!(
+        profile.threshold_identity,
+        ThresholdIdentity::VerifiedV6OpenPgpSigningKeyFingerprint
+    );
     let signer = CompositeSigner::generate()?;
     let key = signer.tuf_key();
     let alias = openpgp_key(alternate_public_projection(&signer.cert)?);
@@ -800,89 +820,90 @@ fn metafile(bytes: &[u8]) -> Metafile {
     }
 }
 
-fn experimental_profile() -> BTreeMap<&'static str, serde_json::Value> {
-    BTreeMap::from([
-        ("canonicalization", serde_json::json!("tuf-canonical-json")),
-        ("digest_algorithm", serde_json::json!("sha512")),
-        (
-            "lifecycle_fog",
-            serde_json::json!([
-                "accepted_time",
-                "consistent_snapshot",
-                "expiry",
-                "root_bootstrap",
-                "rollback",
-            ]),
-        ),
-        (
-            "openpgp_profile",
-            serde_json::json!({
-                "certificate_version": 6,
-                "signature_algorithm": 30,
-                "signature_hash": "sha512",
-            }),
-        ),
-        (
-            "signature_components",
-            serde_json::json!(["ed25519", "ml-dsa-65"]),
-        ),
-        (
-            "signature_scheme",
-            serde_json::json!("openpgp-v6-algorithm-30-ed25519+mldsa65"),
-        ),
-        ("tuf_spec_version", serde_json::json!("1.0.36")),
-        (
-            "threshold_identity",
-            serde_json::json!("verified-openpgp-v6-signing-key-fingerprint"),
-        ),
-    ])
-}
+fn assert_metadata_descriptor(rule: &DescriptorRules, descriptor: &Metafile, bytes: &[u8]) {
+    assert_eq!(rule.length, DescriptorRequirement::Required);
+    assert_eq!(rule.hashes, [DescriptorHash::Sha256]);
+    assert_eq!(descriptor.length, Some(bytes.len() as u64));
+    assert_eq!(
+        descriptor.hashes.as_ref().unwrap().sha256.as_ref(),
+        digest(&SHA256, bytes).as_ref()
+    );
 
-fn validate_experimental_profile(
-    profile: &BTreeMap<&'static str, serde_json::Value>,
-) -> Result<(), &'static str> {
-    const REQUIRED: [&str; 8] = [
-        "canonicalization",
-        "digest_algorithm",
-        "lifecycle_fog",
-        "openpgp_profile",
-        "signature_components",
-        "signature_scheme",
-        "threshold_identity",
-        "tuf_spec_version",
-    ];
-    if profile.keys().any(|key| !REQUIRED.contains(key)) {
-        return Err("undefined profile field");
-    }
-    if REQUIRED.iter().any(|key| !profile.contains_key(key)) {
-        return Err("missing profile field");
-    }
-    Ok(())
+    let wire = serde_json::to_value(descriptor).unwrap();
+    let fields = wire.as_object().unwrap();
+    assert_eq!(fields.len(), 3);
+    assert!(fields.contains_key("length"));
+    assert!(fields.contains_key("version"));
+    let hashes = fields["hashes"].as_object().unwrap();
+    assert_eq!(hashes.len(), 1);
+    assert!(hashes.contains_key("sha256"));
 }
 
 #[test]
-fn experimental_profile_is_deterministic_and_closed() -> openpgp::Result<()> {
-    let profile = experimental_profile();
-    validate_experimental_profile(&profile).expect("evidenced profile must validate");
-    let canonical = serde_json::to_vec(&profile)?;
+fn experimental_profile_rejects_malformed_or_ambiguous_input() {
+    let profile = parse_experimental_profile(EXPERIMENTAL_PROFILE_JSON.as_bytes()).unwrap();
     assert_eq!(
-        canonical,
-        br#"{"canonicalization":"tuf-canonical-json","digest_algorithm":"sha512","lifecycle_fog":["accepted_time","consistent_snapshot","expiry","root_bootstrap","rollback"],"openpgp_profile":{"certificate_version":6,"signature_algorithm":30,"signature_hash":"sha512"},"signature_components":["ed25519","ml-dsa-65"],"signature_scheme":"openpgp-v6-algorithm-30-ed25519+mldsa65","threshold_identity":"verified-openpgp-v6-signing-key-fingerprint","tuf_spec_version":"1.0.36"}"#
+        serde_json::to_string(&profile).unwrap(),
+        EXPERIMENTAL_PROFILE_JSON,
+        "the accepted typed fixture must serialize to the exact deterministic bytes"
     );
 
-    let mut malformed = profile;
-    malformed.insert("expiry_policy", serde_json::json!("safe"));
-    assert_eq!(
-        validate_experimental_profile(&malformed),
-        Err("undefined profile field")
-    );
-    Ok(())
+    let malformed = [
+        EXPERIMENTAL_PROFILE_JSON.replace("1.0.36", "1.0.35"),
+        EXPERIMENTAL_PROFILE_JSON.replace(
+            "\"lifecycle_fog\":[\"accepted_time\",\"consistent_snapshot\",\"expiry\",\"root_bootstrap\",\"rollback\"]",
+            "\"lifecycle_fog\":null",
+        ),
+        EXPERIMENTAL_PROFILE_JSON.replace(
+            "\"lifecycle_fog\":[\"accepted_time\",\"consistent_snapshot\",\"expiry\",\"root_bootstrap\",\"rollback\"]",
+            "\"lifecycle_fog\":[]",
+        ),
+        EXPERIMENTAL_PROFILE_JSON.replace(
+            "{\"canonicalization\"",
+            "{\"tuf_spec_version\":\"1.0.36\",\"canonicalization\"",
+        ),
+        EXPERIMENTAL_PROFILE_JSON.replace(
+            "\"certificate_version\":6",
+            "\"certificate_version\":6,\"undefined\":true",
+        ),
+        EXPERIMENTAL_PROFILE_JSON.replace(
+            ",\"threshold_identity\":\"verified-v6-openpgp-signing-key-fingerprint\"",
+            "",
+        ),
+    ];
+
+    for bytes in malformed {
+        assert!(parse_experimental_profile(bytes.as_bytes()).is_err());
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> {
+    let profile = parse_experimental_profile(EXPERIMENTAL_PROFILE_JSON.as_bytes())?;
+    assert_eq!(profile.canonicalization, Canonicalization::TufCanonicalJson);
+    assert_eq!(profile.tuf_spec_version, TufSpecVersion::V1_0_36);
+    assert_eq!(
+        profile.extensions.target_custom,
+        TargetCustomHandling::PreserveOpaque
+    );
     let signer = CompositeSigner::generate()?;
     let key = signer.tuf_key();
+    let key_wire = serde_json::to_value(&key)?;
+    assert_eq!(
+        key_wire["keytype"],
+        serde_json::to_value(profile.openpgp.key_type)?
+    );
+    assert_eq!(profile.openpgp.key_type, OpenPgpKeyType::OpenPgpRfc9580);
+    assert_eq!(
+        key_wire["scheme"],
+        serde_json::to_value(profile.openpgp.signature_scheme)?
+    );
+    assert_eq!(
+        profile.openpgp.signature_scheme,
+        SignatureScheme::OpenPgpRfc9980MlDsa65Ed25519Sha512
+    );
+    assert_eq!(signer.cert.primary_key().key().version(), 6);
+    assert_eq!(profile.openpgp.certificate_version, 6);
     let key_id = key.key_id()?;
     let role_key = role_keys(key_id.clone());
     let mut roles = HashMap::new();
@@ -899,6 +920,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         roles,
         _extra: HashMap::new(),
     };
+    assert_eq!(root.spec_version, "1.0.36");
     let key_sources: Vec<Box<dyn KeySource>> = vec![Box::new(signer.clone())];
     let rng = SystemRandom::new();
 
@@ -921,9 +943,25 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
             sha256: digest(&SHA256, artifact).as_ref().to_vec().into(),
             _extra: HashMap::new(),
         },
-        custom: HashMap::new(),
+        custom: HashMap::from([("experimental-profile".to_owned(), serde_json::json!(true))]),
         _extra: HashMap::new(),
     };
+    assert_eq!(
+        serde_json::to_value(&artifact_target)?,
+        serde_json::json!({
+            "custom": {"experimental-profile": true},
+            "hashes": {
+                "sha256": "d13ecc865c37b23650615038c232eccfa5770c8bc345dbe98db595273fecda4a"
+            },
+            "length": 27,
+        }),
+        "target descriptors must use the exact length, hashes.sha256, and custom wire labels"
+    );
+    assert_eq!(
+        profile.descriptors.target.length,
+        DescriptorRequirement::Required
+    );
+    assert_eq!(profile.descriptors.target.hashes, [DescriptorHash::Sha256]);
     let top_targets = Targets {
         spec_version: "1.0.36".to_owned(),
         version: NonZeroU64::new(1).unwrap(),
@@ -941,6 +979,39 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     )
     .await?;
     assert_top_level_role_verified(&root, signed_targets.signed());
+    let mut target_signature_packets =
+        PacketPile::from_bytes(&signed_targets.signed().signatures[0].sig)?.into_children();
+    let Some(Packet::Signature(target_signature)) = target_signature_packets.next() else {
+        panic!("the targets role must carry one OpenPGP signature packet");
+    };
+    assert!(target_signature_packets.next().is_none());
+    assert_eq!(
+        target_signature.version(),
+        profile.openpgp.signature_version
+    );
+    assert_eq!(
+        u8::from(target_signature.typ()),
+        profile.openpgp.signature_type
+    );
+    assert_eq!(
+        u8::from(target_signature.pk_algo()),
+        profile.openpgp.public_key_algorithm
+    );
+    assert_eq!(target_signature.hash_algo(), HashAlgorithm::SHA512);
+    assert_eq!(profile.openpgp.signature_hash, SignatureHash::Sha512);
+    assert_eq!(
+        target_signature.issuer_fingerprints().count(),
+        profile.openpgp.issuer_fingerprints
+    );
+    assert_eq!(
+        profile.openpgp.signature_components,
+        [SignatureComponent::Ed25519, SignatureComponent::MlDsa65]
+    );
+    assert_ne!(
+        serde_json::to_value(profile.openpgp.signature_hash)?,
+        serde_json::to_value(profile.descriptors.metadata.hashes[0])?,
+        "the SHA-512 signature digest and SHA-256 descriptor digest are distinct layers"
+    );
 
     let delegated_targets = DelegatedTargets {
         name: role_name.to_owned(),
@@ -983,16 +1054,25 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     let signed_targets_bytes = signed_targets.buffer().clone();
     let reparsed_targets: Signed<Targets> = serde_json::from_slice(&signed_targets_bytes)?;
     root.verify_role(&reparsed_targets)?;
+    let targets_metafile = metafile(&signed_targets_bytes);
+    assert_metadata_descriptor(
+        &profile.descriptors.metadata,
+        &targets_metafile,
+        &signed_targets_bytes,
+    );
+    let delegated_metafile = metafile(&delegated_targets_bytes);
+    assert_metadata_descriptor(
+        &profile.descriptors.metadata,
+        &delegated_metafile,
+        &delegated_targets_bytes,
+    );
     let snapshot = Snapshot {
         spec_version: "1.0.36".to_owned(),
         version: NonZeroU64::new(1).unwrap(),
         expires: "2999-01-01T00:00:00Z".parse().unwrap(),
         meta: HashMap::from([
-            ("targets.json".to_owned(), metafile(&signed_targets_bytes)),
-            (
-                "delegated.json".to_owned(),
-                metafile(&delegated_targets_bytes),
-            ),
+            ("targets.json".to_owned(), targets_metafile),
+            ("delegated.json".to_owned(), delegated_metafile),
         ]),
         _extra: HashMap::new(),
     };
@@ -1013,9 +1093,15 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         NonZeroU64::new(1).unwrap(),
         "2999-01-01T00:00:00Z".parse().unwrap(),
     );
+    let snapshot_metafile = metafile(&snapshot_bytes);
+    assert_metadata_descriptor(
+        &profile.descriptors.metadata,
+        &snapshot_metafile,
+        &snapshot_bytes,
+    );
     timestamp
         .meta
-        .insert("snapshot.json".to_owned(), metafile(&snapshot_bytes));
+        .insert("snapshot.json".to_owned(), snapshot_metafile);
     let signed_timestamp = SignedRole::new(
         timestamp.clone(),
         &KeyHolder::Root(root.clone()),
@@ -1028,15 +1114,17 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     root.verify_role(&reparsed_timestamp)?;
 
     let mut linked_delegations = delegations;
-    linked_delegations.roles[0].targets = Some(delegated_signed);
+    linked_delegations.roles[0].targets = Some(reparsed_role);
     let mut linked_targets = signed_targets.signed().clone();
     linked_targets.signed.delegations = Some(linked_delegations);
+    let found_target = linked_targets
+        .signed
+        .find_target(&TargetName::new("artifact.bin")?, false)?;
+    assert_eq!(found_target.length, artifact.len() as u64);
     assert_eq!(
-        linked_targets
-            .signed
-            .find_target(&TargetName::new("artifact.bin")?, false)?
-            .length,
-        artifact.len() as u64
+        found_target.custom.get("experimental-profile"),
+        Some(&serde_json::json!(true)),
+        "opaque target custom data must survive serialization and delegated traversal"
     );
 
     let expected_canonical = vec![

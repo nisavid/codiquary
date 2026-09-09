@@ -23,9 +23,10 @@ OpenPGP verifier ignored fields that changed that ID. The revised patch returns
 a domain-separated threshold identity from signature verification. Existing key
 types retain TUF-key-ID identity; this provisional OpenPGP profile uses the
 verified v6 signing-key fingerprint. Root and delegation verifiers count each
-identity once. This correction is covered by the current all-role fixture and
-independent bounded review; it is not an operator, custody, or underlying-
-component independence claim.
+identity once. The historical review evidence remains bound to its recorded
+revision. The current all-role fixture re-exercises this behavior, but the
+issue-21 correction has not received its later independent pass. This is not an
+operator, custody, or underlying-component independence claim.
 
 A second independent review found that the undefined-field check still ran
 only for a key selected to verify a signature. The current patch moves that
@@ -34,8 +35,11 @@ in direct verification. The correction has new reproducible red/green
 evidence. The applicable pinned Tough default suite now passes, and two focused
 ECDSA regressions exercise the conventional `Key::verify` identity through
 both public threshold loops. This compatibility correction is included in the
-current reviewed fixture; see the
-[current compatibility record](evidence/current-compatibility.md).
+current fixture; its compatibility record still says that independent review
+is pending. The independent issue-21 reviews of commit
+`59833f8a1f189a3b512b22ba9aa21f598333055d` both returned concerns that this
+working-tree correction addresses; they do not approve the corrected bytes.
+See the [current compatibility record](evidence/current-compatibility.md).
 
 The current prototype and Tough results were observed on
 `x86_64-unknown-linux-gnu` with Rust and Cargo 1.98.1 and external OpenSSL
@@ -102,12 +106,14 @@ output:
 
 ```sh
 sha256sum -c <<'CHECKSUMS'
-23861ca0bdef144e3974a753acac92ff715f53cd1614b16bf277488d4d737624  Cargo.toml
-02d9911a563dc2444f2252f8c47a31a545dec1c34fe0fa877ee8c11b0d879ad9  Cargo.lock
+c0aea0775da70c2cae9839e77aadfa07b0670f31e050c7500afc15253229613e  Cargo.toml
+de70879239cb2694440a557af44b39f70b43a88f0ac620ee164ccb17565dd27f  Cargo.lock
+68128e44f362f2f369723eb6f50237fc860cef3b524acdcd4bd36b6c7d479cca  src/lib.rs
+4d70ae8410d93fd45072220bcb31d58f04f4b1157acc89164a9b61c29d26234f  src/experimental_profile.rs
 8540324f3cd231ca244928024b2b1eea92ec2e16433187b2e4b708696b8e50dc  patches/tough-openpgp-rfc9980.patch
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
-c2ab4935f0c58ca4a1ad398007b2ba7c8e9e0c81ed7ea70368e00e4c933f3724  tests/composite_metadata.rs
+bdd669ea07159ea88234e39bba94df14e9d9bfbafff44300edbf6697b25ade8f  tests/composite_metadata.rs
 CHECKSUMS
 
 git -C .scratch/tough apply --check \
@@ -278,8 +284,9 @@ compatibility record binds the exact command and outputs by SHA-256.
 The current fixture covers the root publisher/verifier seam, the composite
 threshold-identity boundary in root and delegation verification, all four
 top-level role shapes, one delegated role with a hashed target, serialized
-snapshot/timestamp references, and a deterministic experimental profile shape.
-It does not decide lifecycle policy: expiry, rollback, accepted time, root
-bootstrap, consistent snapshots, durable refresh or crash recovery, target
-confinement, metadata limits, held-byte policy composition, consumer transport,
-macOS qualification, or operator/custody independence remain later work.
+snapshot/timestamp references, and a closed typed experimental profile matched
+against those observations. It does not decide lifecycle policy: expiry,
+rollback, accepted time, root bootstrap, consistent snapshots, durable refresh
+or crash recovery, target confinement, metadata limits, held-byte policy
+composition, consumer transport, macOS qualification, or operator/custody
+independence remain later work.
