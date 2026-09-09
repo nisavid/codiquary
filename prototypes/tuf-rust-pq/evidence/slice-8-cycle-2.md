@@ -6,9 +6,9 @@ The earlier metadata-wide complete-profile description is superseded.
 Root and Delegations key-map ingestion performs structural validation:
 deserialization recognizes the key type and scheme and decodes the public
 bytes; `validate_metadata_profile` rejects undefined provisional OpenPGP outer
-and `keyval` fields; and `deserialize_keys` requires a matching key ID and no
-duplicate key ID. These checks apply to every key-map entry, including unused
-keys.
+and `keyval` fields under the helper's historical name at this checkpoint; and
+`deserialize_keys` requires a matching key ID and no duplicate key ID. These
+checks apply to every key-map entry, including unused keys.
 
 Complete cryptographic-profile validation occurs when a key is selected for
 signature verification. It checks canonical certificate and signature
@@ -104,9 +104,10 @@ insertions and 16 deletions. Relative to the reviewed 11,405-byte patch, it
 adds two files to the patch surface, 20 insertions, one deletion, and 1,716
 patch bytes:
 
-- `schema::key::Key::validate_metadata_profile` checks only that provisional
-  OpenPGP outer and `keyval` extension maps are empty; parsing and direct
-  signature verification share that check.
+- `schema::key::Key::validate_metadata_profile`, the helper's historical name
+  at this checkpoint, checks only that provisional OpenPGP outer and `keyval`
+  extension maps are empty; parsing and direct signature verification share
+  that check.
 - `schema::de::deserialize_keys` calls it for every key-map value before
   metadata construction.
 - `schema::error::Error` gains an invalid-key profile error for the parsing

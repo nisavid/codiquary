@@ -31,6 +31,11 @@ focused independent maintenance review are tracked in
 - Focused prototype test source SHA-256
   `f4a6691f666b403cbffce59a9588a845f4d9333911a72c2de5b9d0e61e954a2f`
 
+The executable-input patch above used the historical helper name
+`validate_metadata_profile`. The current source uses
+`validate_openpgp_extension_fields` with unchanged behavior; its current
+checksum does not replace this revision-bound hash.
+
 The pristine upstream Tough lock has SHA-256
 `4614aae895dc084dc1abb34a13f3322f60456108a3abf529f52af246f6b5bfdb`.
 It is not the replay lock. Selecting the pinned Sequoia checkout through the
@@ -51,7 +56,8 @@ places:
 - The metadata key-map deserializer structurally validates every OpenPGP key,
   including unused keys: it accepts only recognized wire labels and decodable
   public bytes, rejects undefined outer and `keyval` fields through
-  `validate_metadata_profile`, and requires a matching, nonduplicate key ID.
+  `validate_openpgp_extension_fields`, and requires a matching, nonduplicate
+  key ID.
 - When an OpenPGP key is selected, signature verification additionally checks
   canonical certificate and signature encodings, the v6 algorithm-30 and sole
   eligible signing-key constraints, the SHA-512 binary signature and issuer

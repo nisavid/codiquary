@@ -36,8 +36,8 @@ or broader cryptographic audit claim.
 A second independent review found that the undefined-field check still ran
 only for a key selected to verify a signature. The patch moves that
 extension-field check to the shared metadata key-map deserializer and retains
-it in direct verification. Despite its name, `validate_metadata_profile`
-checks only that the provisional OpenPGP outer and `keyval` extension maps are
+it in direct verification. `validate_openpgp_extension_fields` checks only
+that the provisional OpenPGP outer and `keyval` extension maps are
 empty. Complete certificate, signing-key, encoding, algorithm, and signature
 validation runs when the key is selected for verification. The current
 maintenance replay covers that ingestion change, the shared root and
@@ -117,7 +117,7 @@ c0aea0775da70c2cae9839e77aadfa07b0670f31e050c7500afc15253229613e  Cargo.toml
 de70879239cb2694440a557af44b39f70b43a88f0ac620ee164ccb17565dd27f  Cargo.lock
 68128e44f362f2f369723eb6f50237fc860cef3b524acdcd4bd36b6c7d479cca  src/lib.rs
 b2ae11447744e91adcb6ba222d6bfddbf7787e1a76e8fe60f0655e8444ea810d  src/experimental_profile.rs
-8540324f3cd231ca244928024b2b1eea92ec2e16433187b2e4b708696b8e50dc  patches/tough-openpgp-rfc9980.patch
+3073411e32c9048039eec40743db182d36bf4e6a2d1c14d0b7129799bb0ac335  patches/tough-openpgp-rfc9980.patch
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
 f4a6691f666b403cbffce59a9588a845f4d9333911a72c2de5b9d0e61e954a2f  tests/composite_metadata.rs
@@ -149,9 +149,9 @@ git -C .scratch/tough apply ../../patches/tough-openpgp-rfc9980.patch
 
 sha256sum -c <<'CHECKSUMS'
 8b4c3d4803ed2e0fa4250fd7e9069b628d537b67122f999e6ae78a35118cbb84  .scratch/tough/tough/Cargo.toml
-ac1b3c4fb6242f109a08bce5d10fcf8b2bbb56248a8b57c14792fc498dbb0575  .scratch/tough/tough/src/schema/de.rs
+0b134426d0f91626691a3aa94aa322bebc0be278c0ca6aeb0a9cb0404674d747  .scratch/tough/tough/src/schema/de.rs
 3ac428c534fa2b7560febb58b959091015ab20f84b2ba04170c71193d8094993  .scratch/tough/tough/src/schema/error.rs
-0b62446332794800c3b24660acceb0d22a9e9f603ec69ae79a59ddf143879104  .scratch/tough/tough/src/schema/key.rs
+f5f2f2bc558300e0191e38cd2d215efec55baa71ea3dd8e9b6fc85ffd48df30b  .scratch/tough/tough/src/schema/key.rs
 dc9d19ecf6332fa909b20e31d68463f0c64c79f54f8561bb0b8eeb0e714c6685  .scratch/tough/tough/src/schema/verify.rs
 CHECKSUMS
 ```

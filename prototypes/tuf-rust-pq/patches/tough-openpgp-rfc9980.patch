@@ -18,7 +18,7 @@ index 1601838..bb7b24e 100644
          key: Key,
          map: &mut HashMap<Decoded<Hex>, Key>,
      ) -> Result<(), error::Error> {
-+        key.validate_metadata_profile()?;
++        key.validate_openpgp_extension_fields()?;
          let calculated = key.key_id()?;
          let keyid_hex = hex::encode(&keyid);
          ensure!(
@@ -115,8 +115,8 @@ index 24f4c9f..24f258a 100644
  }
  
  impl Key {
-+    /// Validates constraints shared by metadata ingestion and signature verification.
-+    pub(super) fn validate_metadata_profile(&self) -> Result<()> {
++    /// Rejects undefined provisional OpenPGP outer and keyval extension fields.
++    pub(super) fn validate_openpgp_extension_fields(&self) -> Result<()> {
 +        if let Key::OpenPgp { keyval, _extra, .. } = self {
 +            ensure!(
 +                _extra.is_empty() && keyval._extra.is_empty(),
@@ -149,7 +149,7 @@ index 24f4c9f..24f258a 100644
 +            ..
 +        } = self
 +        {
-+            self.validate_metadata_profile().ok()?;
++            self.validate_openpgp_extension_fields().ok()?;
 +            return verify_openpgp_rfc9980(&keyval.public, msg, signature)
 +                .ok()
 +                .map(ThresholdIdentity::OpenPgpSigningKey);
