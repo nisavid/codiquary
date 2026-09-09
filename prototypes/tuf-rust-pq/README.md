@@ -33,14 +33,14 @@ A second independent review found that the undefined-field check still ran
 only for a key selected to verify a signature. The current patch moves that
 profile validation to the shared metadata key-map deserializer and retains it
 in direct verification. The correction has new reproducible red/green
-evidence. The applicable pinned Tough default suite now passes, and two focused
-ECDSA regressions exercise the conventional `Key::verify` identity through
-both public threshold loops. This compatibility correction is included in the
-current fixture; its compatibility record still says that independent review
-is pending. See the
-[current compatibility record](evidence/current-compatibility.md).
+evidence. The applicable pinned Tough default suite passed at the recorded
+historical revision, and two focused ECDSA regressions exercised the
+conventional `Key::verify` identity through both public threshold loops. The
+compatibility record still says that independent review is pending and does not
+describe this candidate. See the
+[historical compatibility record](evidence/current-compatibility.md).
 
-The current prototype and Tough results were observed on
+Those historical prototype and Tough results were observed on
 `x86_64-unknown-linux-gnu` with Rust and Cargo 1.98.1 and external OpenSSL
 3.6.3. An earlier Tough run used the host's Rust and Cargo 1.98.0 and remains
 only as superseded diagnostic evidence. The Sequoia backend requires OpenSSL
@@ -108,11 +108,11 @@ sha256sum -c <<'CHECKSUMS'
 c0aea0775da70c2cae9839e77aadfa07b0670f31e050c7500afc15253229613e  Cargo.toml
 de70879239cb2694440a557af44b39f70b43a88f0ac620ee164ccb17565dd27f  Cargo.lock
 68128e44f362f2f369723eb6f50237fc860cef3b524acdcd4bd36b6c7d479cca  src/lib.rs
-dd30b0f4b90190d9e1e877f7306c273234935957233b0e0ac5b14d09867a90b0  src/experimental_profile.rs
+13ea6517b962f126a2e245aff4bb72e212f7db6d4e71324ec8b028113518a633  src/experimental_profile.rs
 8540324f3cd231ca244928024b2b1eea92ec2e16433187b2e4b708696b8e50dc  patches/tough-openpgp-rfc9980.patch
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
-fb03d99827fadcd115e49ceae16937dac38ff4404a2b253d37624f4614278c32  tests/composite_metadata.rs
+3d99bf889e1990f97188aaad568d9a73b8f4ff3b06d7f6946489012b737bf7e4  tests/composite_metadata.rs
 CHECKSUMS
 
 git -C .scratch/tough apply --check \
@@ -178,8 +178,8 @@ Tough normal/build/dev graph was separately resolved with the pinned Sequoia
 path source. Of its 263 reachable packages, 145 package name/version pairs were
 new relative to the prototype inventory. Their registry archives, manifests,
 build scripts, and proc macros were inspected before the locked offline suite
-ran. The exact graph, lock, results, and limits are in the
-[current compatibility record](evidence/current-compatibility.md).
+ran. The exact historical graph, lock, results, and limits are in the
+[historical compatibility record](evidence/current-compatibility.md).
 
 ## Run the tested slice
 
@@ -217,21 +217,24 @@ the host denied Bubblewrap's `NETLINK_ROUTE` socket. The recorded green run used
 network access. Use that substitution only after independently verifying the
 parent network denial; otherwise the replay prerequisite is unsatisfied.
 
-The test should report eleven passing integration tests, including the
-deterministic experimental-profile and all-role metadata-chain fixtures.
-Its generated key ID and fingerprint vary by run. Compare the stable format and
-rejection assertions with the
-[current compatibility record](evidence/current-compatibility.md). The
+The command reports its integration-test count and exercises the deterministic
+experimental-profile and all-role metadata-chain fixtures. Its generated key
+ID and fingerprint vary by run. Revision-bound command outputs, counts, hashes,
+and the final source revision belong in
+[issue 21](https://github.com/nisavid/codiquary/issues/21) and its pull request.
+The [historical compatibility record](evidence/current-compatibility.md),
 [Cycle 2 record](evidence/slice-8-cycle-2.md),
 [threshold-identity record](evidence/slice-5-threshold-identity.md), and
 [original red/green record](evidence/slice-3-red-green.md) preserve their
 historical checkpoints.
 
-## Run the applicable Tough suite
+## Replay the historical applicable Tough suite
 
-The patched Sequoia edge needs a workspace source override and its ordinary
-Cargo-resolved test lock; the pristine upstream lock is not the executed lock.
-After applying the main source patch above, apply the replay inputs:
+This separate replay does not qualify the current profile candidate. The
+patched Sequoia edge needs a workspace source override and its ordinary
+Cargo-resolved test lock; the pristine upstream lock is not the historically
+executed lock. After applying the main source patch above, apply the replay
+inputs:
 
 ```sh
 git -C .scratch/tough apply --check \
@@ -246,7 +249,8 @@ CHECKSUMS
 ```
 
 Fetch the locked Linux test graph without building it. Before execution,
-repeat the bounded graph-delta inspection in the current compatibility record.
+repeat the bounded graph-delta inspection in the
+[historical compatibility record](evidence/current-compatibility.md).
 
 ```sh
 tuf278_tough_cargo="$(rustup which --toolchain 1.98.1 cargo)"
@@ -275,8 +279,8 @@ tuf278_tough_cargo="$(rustup which --toolchain 1.98.1 cargo)"
 ```
 
 The recorded run passed 78 tests, failed 0, and ignored 1. No Tough feature was
-enabled; `http`, `http2`, and `integ` remain outside this slice. The current
-compatibility record binds the exact command and outputs by SHA-256.
+enabled; `http`, `http2`, and `integ` remain outside this slice. The historical
+compatibility record binds that command and its outputs by SHA-256.
 
 ## Scope
 

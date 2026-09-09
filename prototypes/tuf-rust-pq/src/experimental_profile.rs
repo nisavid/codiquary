@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
-pub const EXPERIMENTAL_PROFILE_JSON: &str = r#"{"canonicalization":"tuf-canonical-json","descriptors":{"metadata":{"hashes":["sha256"],"length":"required"},"target":{"hashes":["sha256"],"length":"required"}},"extensions":{"openpgp_key":"reject-undefined","openpgp_keyval":"reject-undefined","target_custom":"preserve-opaque"},"lifecycle_fog":["accepted_time","consistent_snapshot","expiry","root_bootstrap","root_rotation","rollback"],"openpgp":{"certificate_version":6,"issuer_fingerprints":1,"key_type":"openpgp-rfc9580","public_key_algorithm":30,"signature_components":["ed25519","ml-dsa-65"],"signature_hash":"sha512","signature_scheme":"openpgp-rfc9980-ml-dsa-65+ed25519-sha512","signature_type":0,"signature_version":6},"threshold_identity":"verified-v6-openpgp-signing-key-fingerprint","tuf_spec_version":"1.0.36"}"#;
+pub const EXPERIMENTAL_PROFILE_JSON: &str = r#"{"canonicalization":"tuf-canonical-json","descriptors":{"metadata":{"hashes":["sha256"],"length":"required"},"target":{"hashes":["sha256"],"length":"required"}},"extensions":{"openpgp_key":"reject-undefined","openpgp_keyval":"reject-undefined","target_custom":"preserve-opaque"},"lifecycle_fog":["accepted_time","consistent_snapshot","expiry","root_bootstrap","root_rotation","rollback"],"openpgp":{"certificate_primary_key_algorithm":30,"certificate_primary_key_version":6,"detached_signature_encoding":"canonical-unarmored-detached-signature","eligible_signing_key_algorithm":30,"eligible_signing_key_version":6,"eligible_signing_keys":1,"issuer_fingerprints":1,"key_type":"openpgp-rfc9580","public_certificate_encoding":"canonical-unarmored-public-certificate","signature_components":["ed25519","ml-dsa-65"],"signature_hash":"sha512","signature_packet_algorithm":30,"signature_packet_version":6,"signature_packets":1,"signature_scheme":"openpgp-rfc9980-ml-dsa-65+ed25519-sha512","signature_type":0},"threshold_identity":"verified-v6-openpgp-signing-key-fingerprint","tuf_spec_version":"1.0.36"}"#;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -89,15 +89,34 @@ pub enum LifecycleQuestion {
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenPgpProfile {
-    pub certificate_version: u8,
+    pub certificate_primary_key_algorithm: u8,
+    pub certificate_primary_key_version: u8,
+    pub detached_signature_encoding: DetachedSignatureEncoding,
+    pub eligible_signing_key_algorithm: u8,
+    pub eligible_signing_key_version: u8,
+    pub eligible_signing_keys: usize,
     pub issuer_fingerprints: usize,
     pub key_type: OpenPgpKeyType,
-    pub public_key_algorithm: u8,
+    pub public_certificate_encoding: PublicCertificateEncoding,
     pub signature_components: [SignatureComponent; 2],
     pub signature_hash: SignatureHash,
+    pub signature_packet_algorithm: u8,
+    pub signature_packet_version: u8,
+    pub signature_packets: usize,
     pub signature_scheme: SignatureScheme,
     pub signature_type: u8,
-    pub signature_version: u8,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+pub enum DetachedSignatureEncoding {
+    #[serde(rename = "canonical-unarmored-detached-signature")]
+    CanonicalUnarmoredDetachedSignature,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+pub enum PublicCertificateEncoding {
+    #[serde(rename = "canonical-unarmored-public-certificate")]
+    CanonicalUnarmoredPublicCertificate,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
@@ -176,22 +195,51 @@ pub fn parse_experimental_profile(bytes: &[u8]) -> Result<ExperimentalProfile, P
 
 impl ExperimentalProfile {
     fn validate(&self) -> Result<(), ProfileError> {
-        if self.openpgp.certificate_version != 6 {
-            return Err(ProfileError::Invalid("certificate version must be 6"));
+        if self.openpgp.certificate_primary_key_algorithm != 30 {
+            return Err(ProfileError::Invalid(
+                "certificate primary-key algorithm must be 30",
+            ));
+        }
+        if self.openpgp.certificate_primary_key_version != 6 {
+            return Err(ProfileError::Invalid(
+                "certificate primary-key version must be 6",
+            ));
+        }
+        if self.openpgp.eligible_signing_key_algorithm != 30 {
+            return Err(ProfileError::Invalid(
+                "eligible signing-key algorithm must be 30",
+            ));
+        }
+        if self.openpgp.eligible_signing_key_version != 6 {
+            return Err(ProfileError::Invalid(
+                "eligible signing-key version must be 6",
+            ));
         }
         if self.openpgp.issuer_fingerprints != 1 {
             return Err(ProfileError::Invalid(
                 "exactly one issuer fingerprint is required",
             ));
         }
-        if self.openpgp.public_key_algorithm != 30 {
-            return Err(ProfileError::Invalid("public-key algorithm must be 30"));
+        if self.openpgp.eligible_signing_keys != 1 {
+            return Err(ProfileError::Invalid(
+                "exactly one eligible signing key is required",
+            ));
+        }
+        if self.openpgp.signature_packet_algorithm != 30 {
+            return Err(ProfileError::Invalid(
+                "signature-packet algorithm must be 30",
+            ));
         }
         if self.openpgp.signature_type != 0 {
             return Err(ProfileError::Invalid("signature type must be binary (0)"));
         }
-        if self.openpgp.signature_version != 6 {
-            return Err(ProfileError::Invalid("signature version must be 6"));
+        if self.openpgp.signature_packets != 1 {
+            return Err(ProfileError::Invalid(
+                "exactly one signature packet is required",
+            ));
+        }
+        if self.openpgp.signature_packet_version != 6 {
+            return Err(ProfileError::Invalid("signature-packet version must be 6"));
         }
         if self.openpgp.signature_components
             != [SignatureComponent::Ed25519, SignatureComponent::MlDsa65]

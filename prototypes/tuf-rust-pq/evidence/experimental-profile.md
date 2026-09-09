@@ -5,15 +5,18 @@ The deterministic JSON fixture and closed types in
 `tests/composite_metadata.rs` through the existing Tough and Sequoia public
 interfaces:
 
-- Every exercised root, targets, delegated-targets, snapshot, and timestamp
-  role carries TUF specification version `1.0.36` and is signed over Tough's
-  canonical TUF JSON bytes.
+- A shared assertion binds every constructed and reparsed Root, Targets,
+  Snapshot, and Timestamp value to TUF specification version `1.0.36`.
+  Delegated targets reuse the Targets shape. The exercised signed roles use
+  Tough's canonical TUF JSON bytes.
 - The serialized TUF key uses exact wire labels `openpgp-rfc9580` for
   `keytype` and `openpgp-rfc9980-ml-dsa-65+ed25519-sha512` for `scheme`.
-- The accepted OpenPGP certificate is v6. Its detached signature is one
-  canonical unarmored v6 binary packet: signature type 0, public-key algorithm
-  30, SHA-512, one v6 issuer fingerprint, and Ed25519 plus ML-DSA-65 components.
-  Corrupting either component fails verification.
+- The accepted OpenPGP projection is one canonical unarmored public
+  certificate with a v6 algorithm-30 primary key and exactly one eligible v6
+  algorithm-30 composite signing key. Its detached signature is one canonical
+  unarmored v6 binary packet: signature type 0, public-key algorithm 30,
+  SHA-512, one v6 issuer fingerprint naming that signing key, and Ed25519 plus
+  ML-DSA-65 components. Corrupting either component fails verification.
 - Serialized snapshot and timestamp `Metafile` descriptors carry `length` and
   `hashes.sha256`. The delegated target carries required `length` and
   `hashes.sha256`. SHA-512 is the role-signature digest; SHA-256 is the metadata
@@ -38,6 +41,8 @@ consumer installation are runtime operations outside the profile schema.
 Credentials, release authority, and production authority are also outside this
 evidence.
 
-Revision-bound review evidence for this artifact is tracked in
-[issue 21](https://github.com/nisavid/codiquary/issues/21). This profile is not
-evidence of a broader cryptographic audit.
+Revision-bound review and profile-execution evidence for this artifact belongs
+in [issue 21](https://github.com/nisavid/codiquary/issues/21) and its pull
+request. Those records carry the final revision, command outputs, counts, and
+hashes. This profile does not record a new broad compatibility run or a broader
+cryptographic audit.

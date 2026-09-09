@@ -28,9 +28,9 @@ use tough::sign::Sign;
 use tough::TargetName;
 use tuf_rust_pq_prototype::experimental_profile::{
     parse_experimental_profile, Canonicalization, ClosedExtensionHandling, DescriptorHash,
-    DescriptorRequirement, DescriptorRules, OpenPgpKeyType, SignatureComponent, SignatureHash,
-    SignatureScheme, TargetCustomHandling, ThresholdIdentity, TufSpecVersion,
-    EXPERIMENTAL_PROFILE_JSON,
+    DescriptorRequirement, DescriptorRules, DetachedSignatureEncoding, OpenPgpKeyType,
+    PublicCertificateEncoding, SignatureComponent, SignatureHash, SignatureScheme,
+    TargetCustomHandling, ThresholdIdentity, TufSpecVersion, EXPERIMENTAL_PROFILE_JSON,
 };
 
 const ED25519_SIGNATURE_BYTES: usize = 64;
@@ -772,13 +772,13 @@ async fn publisher_and_verifier_require_both_rfc9980_components() -> openpgp::Re
             "keyType": "openpgp-rfc9580",
             "mlDsa65ComponentCorruptionRejected": true,
             "outerReformatVerified": true,
-            "publicKeyAlgorithm": 30,
+            "signaturePacketAlgorithm": 30,
             "publicProjectionBytes": signer.public_projection.len(),
             "scheme": "openpgp-rfc9980-ml-dsa-65+ed25519-sha512",
             "signaturePacketBytes": signature_packet.len(),
             "signaturePacketCount": 1,
-            "signatureType": 0,
-            "signatureVersion": 6,
+            "signaturePacketType": 0,
+            "signaturePacketVersion": 6,
             "syntheticIndependence": "one generated composite key; no operator, custody, or underlying-key independence claim",
             "thresholdIdentity": "verified-v6-openpgp-signing-key-fingerprint",
             "thresholdTwoSatisfiedByOneCompositeKey": false,
@@ -839,6 +839,16 @@ fn assert_metadata_descriptor(rule: &DescriptorRules, descriptor: &Metafile, byt
     assert!(hashes.contains_key("sha256"));
 }
 
+fn assert_profile_spec_version<T>(expected: TufSpecVersion, role: &T)
+where
+    T: serde::Serialize,
+{
+    assert_eq!(
+        serde_json::to_value(role).unwrap()["spec_version"],
+        serde_json::to_value(expected).unwrap()
+    );
+}
+
 #[test]
 fn experimental_profile_rejects_malformed_or_ambiguous_input() {
     let profile = parse_experimental_profile(EXPERIMENTAL_PROFILE_JSON.as_bytes()).unwrap();
@@ -863,8 +873,8 @@ fn experimental_profile_rejects_malformed_or_ambiguous_input() {
             "{\"tuf_spec_version\":\"1.0.36\",\"canonicalization\"",
         ),
         EXPERIMENTAL_PROFILE_JSON.replace(
-            "\"certificate_version\":6",
-            "\"certificate_version\":6,\"undefined\":true",
+            "\"certificate_primary_key_version\":6",
+            "\"certificate_primary_key_version\":6,\"undefined\":true",
         ),
         EXPERIMENTAL_PROFILE_JSON.replace(
             ",\"threshold_identity\":\"verified-v6-openpgp-signing-key-fingerprint\"",
@@ -874,6 +884,57 @@ fn experimental_profile_rejects_malformed_or_ambiguous_input() {
 
     for bytes in malformed {
         assert!(parse_experimental_profile(bytes.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn experimental_profile_requires_canonical_openpgp_encodings() {
+    let accepted: serde_json::Value = serde_json::from_str(EXPERIMENTAL_PROFILE_JSON).unwrap();
+    assert!(parse_experimental_profile(&serde_json::to_vec(&accepted).unwrap()).is_ok());
+
+    for (field, malformed) in [
+        ("public_certificate_encoding", "ascii-armored-certificate"),
+        ("detached_signature_encoding", "ascii-armored-signature"),
+    ] {
+        let mut rejected = accepted.clone();
+        rejected["openpgp"][field] = serde_json::json!(malformed);
+        assert!(parse_experimental_profile(&serde_json::to_vec(&rejected).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn experimental_profile_requires_one_signing_key_and_signature_packet() {
+    let accepted: serde_json::Value = serde_json::from_str(EXPERIMENTAL_PROFILE_JSON).unwrap();
+    assert!(parse_experimental_profile(&serde_json::to_vec(&accepted).unwrap()).is_ok());
+
+    for (field, malformed) in [
+        ("eligible_signing_keys", 0),
+        ("eligible_signing_keys", 2),
+        ("signature_packets", 0),
+        ("signature_packets", 2),
+    ] {
+        let mut rejected = accepted.clone();
+        rejected["openpgp"][field] = serde_json::json!(malformed);
+        assert!(parse_experimental_profile(&serde_json::to_vec(&rejected).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn experimental_profile_scopes_openpgp_versions_and_algorithms() {
+    let accepted: serde_json::Value = serde_json::from_str(EXPERIMENTAL_PROFILE_JSON).unwrap();
+    assert!(parse_experimental_profile(&serde_json::to_vec(&accepted).unwrap()).is_ok());
+
+    for (field, malformed) in [
+        ("certificate_primary_key_version", 4),
+        ("certificate_primary_key_algorithm", 22),
+        ("eligible_signing_key_version", 4),
+        ("eligible_signing_key_algorithm", 22),
+        ("signature_packet_version", 4),
+        ("signature_packet_algorithm", 22),
+    ] {
+        let mut rejected = accepted.clone();
+        rejected["openpgp"][field] = serde_json::json!(malformed);
+        assert!(parse_experimental_profile(&serde_json::to_vec(&rejected).unwrap()).is_err());
     }
 }
 
@@ -901,6 +962,16 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         TargetCustomHandling::PreserveOpaque
     );
     let signer = CompositeSigner::generate()?;
+    assert_eq!(
+        profile.openpgp.public_certificate_encoding,
+        PublicCertificateEncoding::CanonicalUnarmoredPublicCertificate
+    );
+    let parsed_public_projection = Cert::from_bytes(&signer.public_projection)?;
+    assert!(!parsed_public_projection.is_tsk());
+    assert_eq!(
+        parsed_public_projection.clone().to_vec()?,
+        signer.public_projection
+    );
     let key = signer.tuf_key();
     let key_wire = serde_json::to_value(&key)?;
     assert_eq!(
@@ -916,8 +987,37 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         profile.openpgp.signature_scheme,
         SignatureScheme::OpenPgpRfc9980MlDsa65Ed25519Sha512
     );
-    assert_eq!(signer.cert.primary_key().key().version(), 6);
-    assert_eq!(profile.openpgp.certificate_version, 6);
+    let primary_key = signer.cert.primary_key();
+    assert_eq!(
+        primary_key.key().version(),
+        profile.openpgp.certificate_primary_key_version
+    );
+    assert_eq!(
+        u8::from(primary_key.key().pk_algo()),
+        profile.openpgp.certificate_primary_key_algorithm
+    );
+    let policy = StandardPolicy::new();
+    let eligible_signing_keys: Vec<_> = signer
+        .cert
+        .keys()
+        .with_policy(&policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .for_signing()
+        .collect();
+    assert_eq!(
+        eligible_signing_keys.len(),
+        profile.openpgp.eligible_signing_keys
+    );
+    assert_eq!(
+        eligible_signing_keys[0].key().version(),
+        profile.openpgp.eligible_signing_key_version
+    );
+    assert_eq!(
+        u8::from(eligible_signing_keys[0].key().pk_algo()),
+        profile.openpgp.eligible_signing_key_algorithm
+    );
     let key_id = key.key_id()?;
     let role_key = role_keys(key_id.clone());
     let mut roles = HashMap::new();
@@ -934,7 +1034,9 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         roles,
         _extra: HashMap::new(),
     };
-    assert_eq!(root.spec_version, "1.0.36");
+    assert_profile_spec_version(profile.tuf_spec_version, &root);
+    let reparsed_root: Root = serde_json::from_slice(&serde_json::to_vec(&root)?)?;
+    assert_profile_spec_version(profile.tuf_spec_version, &reparsed_root);
     let key_sources: Vec<Box<dyn KeySource>> = vec![Box::new(signer.clone())];
     let rng = SystemRandom::new();
 
@@ -984,6 +1086,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         delegations: Some(delegations.clone()),
         _extra: HashMap::new(),
     };
+    assert_profile_spec_version(profile.tuf_spec_version, &top_targets);
 
     let signed_targets = SignedRole::new(
         top_targets.clone(),
@@ -993,15 +1096,28 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     )
     .await?;
     assert_top_level_role_verified(&root, signed_targets.signed());
-    let mut target_signature_packets =
-        PacketPile::from_bytes(&signed_targets.signed().signatures[0].sig)?.into_children();
-    let Some(Packet::Signature(target_signature)) = target_signature_packets.next() else {
+    assert_eq!(
+        profile.openpgp.detached_signature_encoding,
+        DetachedSignatureEncoding::CanonicalUnarmoredDetachedSignature
+    );
+    let target_signature_bytes = signed_targets.signed().signatures[0].sig.to_vec();
+    let target_signature_packets: Vec<_> = PacketPile::from_bytes(&target_signature_bytes)?
+        .into_children()
+        .collect();
+    assert_eq!(
+        target_signature_packets.len(),
+        profile.openpgp.signature_packets
+    );
+    let [Packet::Signature(target_signature)] = target_signature_packets.as_slice() else {
         panic!("the targets role must carry one OpenPGP signature packet");
     };
-    assert!(target_signature_packets.next().is_none());
+    assert_eq!(
+        Packet::from(target_signature.clone()).to_vec()?,
+        target_signature_bytes
+    );
     assert_eq!(
         target_signature.version(),
-        profile.openpgp.signature_version
+        profile.openpgp.signature_packet_version
     );
     assert_eq!(
         u8::from(target_signature.typ()),
@@ -1009,13 +1125,21 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     );
     assert_eq!(
         u8::from(target_signature.pk_algo()),
-        profile.openpgp.public_key_algorithm
+        profile.openpgp.signature_packet_algorithm
     );
     assert_eq!(target_signature.hash_algo(), HashAlgorithm::SHA512);
     assert_eq!(profile.openpgp.signature_hash, SignatureHash::Sha512);
     assert_eq!(
         target_signature.issuer_fingerprints().count(),
         profile.openpgp.issuer_fingerprints
+    );
+    assert_eq!(
+        target_signature
+            .issuer_fingerprints()
+            .next()
+            .unwrap()
+            .clone(),
+        eligible_signing_keys[0].key().fingerprint()
     );
     assert_eq!(
         profile.openpgp.signature_components,
@@ -1038,6 +1162,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
             _extra: HashMap::new(),
         },
     };
+    assert_profile_spec_version(profile.tuf_spec_version, &delegated_targets.targets);
     let signed_delegated = SignedRole::new(
         delegated_targets.clone(),
         &KeyHolder::Delegations(delegations.clone()),
@@ -1049,6 +1174,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     let reparsed_delegated: Signed<DelegatedTargets> =
         serde_json::from_slice(&delegated_targets_bytes)?;
     let (_, reparsed_role) = reparsed_delegated.targets();
+    assert_profile_spec_version(profile.tuf_spec_version, &reparsed_role.signed);
     delegations.verify_role(&reparsed_role, role_name)?;
     let delegated_signed = signed_delegated.signed().clone().targets().1;
     delegations.verify_role(&delegated_signed, role_name)?;
@@ -1067,6 +1193,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
 
     let signed_targets_bytes = signed_targets.buffer().clone();
     let reparsed_targets: Signed<Targets> = serde_json::from_slice(&signed_targets_bytes)?;
+    assert_profile_spec_version(profile.tuf_spec_version, &reparsed_targets.signed);
     root.verify_role(&reparsed_targets)?;
     let targets_metafile = metafile(&signed_targets_bytes);
     assert_metadata_descriptor(
@@ -1090,6 +1217,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         ]),
         _extra: HashMap::new(),
     };
+    assert_profile_spec_version(profile.tuf_spec_version, &snapshot);
     let signed_snapshot = SignedRole::new(
         snapshot.clone(),
         &KeyHolder::Root(root.clone()),
@@ -1100,6 +1228,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     assert_top_level_role_verified(&root, signed_snapshot.signed());
     let snapshot_bytes = signed_snapshot.buffer().clone();
     let reparsed_snapshot: Signed<Snapshot> = serde_json::from_slice(&snapshot_bytes)?;
+    assert_profile_spec_version(profile.tuf_spec_version, &reparsed_snapshot.signed);
     root.verify_role(&reparsed_snapshot)?;
 
     let mut timestamp = Timestamp::new(
@@ -1116,6 +1245,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     timestamp
         .meta
         .insert("snapshot.json".to_owned(), snapshot_metafile);
+    assert_profile_spec_version(profile.tuf_spec_version, &timestamp);
     let signed_timestamp = SignedRole::new(
         timestamp.clone(),
         &KeyHolder::Root(root.clone()),
@@ -1125,6 +1255,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
     .await?;
     assert_top_level_role_verified(&root, signed_timestamp.signed());
     let reparsed_timestamp: Signed<Timestamp> = serde_json::from_slice(signed_timestamp.buffer())?;
+    assert_profile_spec_version(profile.tuf_spec_version, &reparsed_timestamp.signed);
     root.verify_role(&reparsed_timestamp)?;
 
     let mut linked_delegations = delegations;
