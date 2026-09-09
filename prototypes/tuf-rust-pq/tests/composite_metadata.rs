@@ -851,11 +851,11 @@ fn experimental_profile_rejects_malformed_or_ambiguous_input() {
     let malformed = [
         EXPERIMENTAL_PROFILE_JSON.replace("1.0.36", "1.0.35"),
         EXPERIMENTAL_PROFILE_JSON.replace(
-            "\"lifecycle_fog\":[\"accepted_time\",\"consistent_snapshot\",\"expiry\",\"root_bootstrap\",\"rollback\"]",
+            "\"lifecycle_fog\":[\"accepted_time\",\"consistent_snapshot\",\"expiry\",\"root_bootstrap\",\"root_rotation\",\"rollback\"]",
             "\"lifecycle_fog\":null",
         ),
         EXPERIMENTAL_PROFILE_JSON.replace(
-            "\"lifecycle_fog\":[\"accepted_time\",\"consistent_snapshot\",\"expiry\",\"root_bootstrap\",\"rollback\"]",
+            "\"lifecycle_fog\":[\"accepted_time\",\"consistent_snapshot\",\"expiry\",\"root_bootstrap\",\"root_rotation\",\"rollback\"]",
             "\"lifecycle_fog\":[]",
         ),
         EXPERIMENTAL_PROFILE_JSON.replace(
@@ -874,6 +874,20 @@ fn experimental_profile_rejects_malformed_or_ambiguous_input() {
 
     for bytes in malformed {
         assert!(parse_experimental_profile(bytes.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn experimental_profile_requires_each_lifecycle_question_once() {
+    let invalid_profiles = [
+        EXPERIMENTAL_PROFILE_JSON.replace(",\"root_rotation\"", ""),
+        EXPERIMENTAL_PROFILE_JSON
+            .replace("\"root_rotation\"", "\"root_rotation\",\"root_rotation\""),
+    ];
+
+    for invalid_profile in invalid_profiles {
+        assert_ne!(invalid_profile, EXPERIMENTAL_PROFILE_JSON);
+        assert!(parse_experimental_profile(invalid_profile.as_bytes()).is_err());
     }
 }
 

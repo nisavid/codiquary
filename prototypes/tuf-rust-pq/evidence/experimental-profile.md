@@ -30,14 +30,14 @@ fixed values, missing or duplicate fields, wrong types, incomplete lifecycle
 fog, and unknown nested fields. The accepted typed value serializes back to the
 exact fixture bytes.
 
-The `lifecycle_fog` array records accepted time, consistent-snapshot behavior,
-expiry, root bootstrap, and rollback as unresolved questions. It selects no
-expiry duration, clock source, rollback rule, bootstrap mechanism, or
-consistent-snapshot policy. Durable refresh, crash recovery, held-byte policy,
-transport, consumer admission or installation, credentials, release authority,
-and production authority are also outside this evidence.
+The `lifecycle_fog` array exhaustively names the profile-level lifecycle
+questions: accepted time and clocks, consistent-snapshot behavior, expiry,
+rollback, root bootstrap, and root rotation. It selects no policy or mechanism
+for them. Durable refresh, crash recovery, held-byte handling, transport, and
+consumer installation are runtime operations outside the profile schema.
+Credentials, release authority, and production authority are also outside this
+evidence.
 
-The independent issue-21 reviews covered commit
-`59833f8a1f189a3b512b22ba9aa21f598333055d` and returned concerns. They are
-historical findings against that candidate, not approval of this correction.
-The coordinator owns the later independent pass over the final revision.
+Revision-bound review evidence for this artifact is tracked in
+[issue 21](https://github.com/nisavid/codiquary/issues/21). This profile is not
+evidence of a broader cryptographic audit.

@@ -24,9 +24,10 @@ a domain-separated threshold identity from signature verification. Existing key
 types retain TUF-key-ID identity; this provisional OpenPGP profile uses the
 verified v6 signing-key fingerprint. Root and delegation verifiers count each
 identity once. The historical review evidence remains bound to its recorded
-revision. The current all-role fixture re-exercises this behavior, but the
-issue-21 correction has not received its later independent pass. This is not an
-operator, custody, or underlying-component independence claim.
+revision. Revision-bound review evidence for the profile correction is tracked
+in [issue 21](https://github.com/nisavid/codiquary/issues/21). This is not an
+operator, custody, underlying-component independence, or broader cryptographic
+audit claim.
 
 A second independent review found that the undefined-field check still ran
 only for a key selected to verify a signature. The current patch moves that
@@ -36,10 +37,8 @@ evidence. The applicable pinned Tough default suite now passes, and two focused
 ECDSA regressions exercise the conventional `Key::verify` identity through
 both public threshold loops. This compatibility correction is included in the
 current fixture; its compatibility record still says that independent review
-is pending. The independent issue-21 reviews of commit
-`59833f8a1f189a3b512b22ba9aa21f598333055d` both returned concerns that this
-working-tree correction addresses; they do not approve the corrected bytes.
-See the [current compatibility record](evidence/current-compatibility.md).
+is pending. See the
+[current compatibility record](evidence/current-compatibility.md).
 
 The current prototype and Tough results were observed on
 `x86_64-unknown-linux-gnu` with Rust and Cargo 1.98.1 and external OpenSSL
@@ -109,11 +108,11 @@ sha256sum -c <<'CHECKSUMS'
 c0aea0775da70c2cae9839e77aadfa07b0670f31e050c7500afc15253229613e  Cargo.toml
 de70879239cb2694440a557af44b39f70b43a88f0ac620ee164ccb17565dd27f  Cargo.lock
 68128e44f362f2f369723eb6f50237fc860cef3b524acdcd4bd36b6c7d479cca  src/lib.rs
-4d70ae8410d93fd45072220bcb31d58f04f4b1157acc89164a9b61c29d26234f  src/experimental_profile.rs
+dd30b0f4b90190d9e1e877f7306c273234935957233b0e0ac5b14d09867a90b0  src/experimental_profile.rs
 8540324f3cd231ca244928024b2b1eea92ec2e16433187b2e4b708696b8e50dc  patches/tough-openpgp-rfc9980.patch
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
-bdd669ea07159ea88234e39bba94df14e9d9bfbafff44300edbf6697b25ade8f  tests/composite_metadata.rs
+fb03d99827fadcd115e49ceae16937dac38ff4404a2b253d37624f4614278c32  tests/composite_metadata.rs
 CHECKSUMS
 
 git -C .scratch/tough apply --check \

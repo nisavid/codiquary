@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
-pub const EXPERIMENTAL_PROFILE_JSON: &str = r#"{"canonicalization":"tuf-canonical-json","descriptors":{"metadata":{"hashes":["sha256"],"length":"required"},"target":{"hashes":["sha256"],"length":"required"}},"extensions":{"openpgp_key":"reject-undefined","openpgp_keyval":"reject-undefined","target_custom":"preserve-opaque"},"lifecycle_fog":["accepted_time","consistent_snapshot","expiry","root_bootstrap","rollback"],"openpgp":{"certificate_version":6,"issuer_fingerprints":1,"key_type":"openpgp-rfc9580","public_key_algorithm":30,"signature_components":["ed25519","ml-dsa-65"],"signature_hash":"sha512","signature_scheme":"openpgp-rfc9980-ml-dsa-65+ed25519-sha512","signature_type":0,"signature_version":6},"threshold_identity":"verified-v6-openpgp-signing-key-fingerprint","tuf_spec_version":"1.0.36"}"#;
+pub const EXPERIMENTAL_PROFILE_JSON: &str = r#"{"canonicalization":"tuf-canonical-json","descriptors":{"metadata":{"hashes":["sha256"],"length":"required"},"target":{"hashes":["sha256"],"length":"required"}},"extensions":{"openpgp_key":"reject-undefined","openpgp_keyval":"reject-undefined","target_custom":"preserve-opaque"},"lifecycle_fog":["accepted_time","consistent_snapshot","expiry","root_bootstrap","root_rotation","rollback"],"openpgp":{"certificate_version":6,"issuer_fingerprints":1,"key_type":"openpgp-rfc9580","public_key_algorithm":30,"signature_components":["ed25519","ml-dsa-65"],"signature_hash":"sha512","signature_scheme":"openpgp-rfc9980-ml-dsa-65+ed25519-sha512","signature_type":0,"signature_version":6},"threshold_identity":"verified-v6-openpgp-signing-key-fingerprint","tuf_spec_version":"1.0.36"}"#;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -12,7 +12,7 @@ pub struct ExperimentalProfile {
     pub canonicalization: Canonicalization,
     pub descriptors: Descriptors,
     pub extensions: Extensions,
-    pub lifecycle_fog: [LifecycleQuestion; 5],
+    pub lifecycle_fog: [LifecycleQuestion; 6],
     pub openpgp: OpenPgpProfile,
     pub threshold_identity: ThresholdIdentity,
     pub tuf_spec_version: TufSpecVersion,
@@ -80,6 +80,8 @@ pub enum LifecycleQuestion {
     Expiry,
     #[serde(rename = "root_bootstrap")]
     RootBootstrap,
+    #[serde(rename = "root_rotation")]
+    RootRotation,
     #[serde(rename = "rollback")]
     Rollback,
 }
@@ -204,6 +206,7 @@ impl ExperimentalProfile {
                 LifecycleQuestion::ConsistentSnapshot,
                 LifecycleQuestion::Expiry,
                 LifecycleQuestion::RootBootstrap,
+                LifecycleQuestion::RootRotation,
                 LifecycleQuestion::Rollback,
             ]
         {
