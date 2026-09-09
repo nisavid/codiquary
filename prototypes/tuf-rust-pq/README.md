@@ -43,7 +43,8 @@ ECDSA identity behavior retained through both public threshold loops. See the
 Final verification and focused maintenance review are tracked in
 [Correct and replay the current Tough compatibility record](https://github.com/nisavid/codiquary/issues/24).
 
-The current replay was observed at executable input revision
+The replay receipts maintained in this document are executable-input
+provenance from revision
 `298fd26fe44a759da54d3fe8ef9fb34446c4c981` on
 `x86_64-unknown-linux-gnu` with Rust, Cargo, and rustdoc 1.98.1 and external
 OpenSSL 3.6.3. The Sequoia backend requires OpenSSL 3.5 or newer. macOS remains

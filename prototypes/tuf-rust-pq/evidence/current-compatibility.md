@@ -82,7 +82,12 @@ prototype tests cover that changed identity path through public
 `Root::verify_role` and `Delegations::verify_role` seams. They do not expand
 Tough's accepted conventional parsing boundary.
 
-## Current results
+## Executable-input results
+
+The receipts in this section are immutable provenance for executable input
+revision `298fd26fe44a759da54d3fe8ef9fb34446c4c981`; they are not the separate
+final-candidate verification receipts recorded in
+[Correct and replay the current Tough compatibility record](https://github.com/nisavid/codiquary/issues/24).
 
 The prototype command passed 15 tests, failed 0, and ignored 0. Its raw
 command/output SHA-256 values are
