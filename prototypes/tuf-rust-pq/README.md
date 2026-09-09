@@ -14,6 +14,9 @@ fixture is documented in [evidence/experimental-profile.md](evidence/experimenta
 The separate [interrupted-refresh observation](evidence/issue-22-interrupted-refresh.md)
 uses fixed public metadata to record one process interruption at Tough's
 existing datastore/filesystem seam.
+The dedicated [publisher/client binding](evidence/issue-23-publisher-client-binding.md)
+loads one public metadata fixture through Tough and binds its selected target
+descriptor to the publisher's exact bytes.
 
 > [!CAUTION]
 > This is one synthetic publisher/verifier seam, not a production security
@@ -115,7 +118,15 @@ b2ae11447744e91adcb6ba222d6bfddbf7787e1a76e8fe60f0655e8444ea810d  src/experiment
 8540324f3cd231ca244928024b2b1eea92ec2e16433187b2e4b708696b8e50dc  patches/tough-openpgp-rfc9980.patch
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
-3d99bf889e1990f97188aaad568d9a73b8f4ff3b06d7f6946489012b737bf7e4  tests/composite_metadata.rs
+f4a6691f666b403cbffce59a9588a845f4d9333911a72c2de5b9d0e61e954a2f  tests/composite_metadata.rs
+db82024b6d52d1a1cebc9cd418fe42c1b46613976118145577a1c2eee04853f6  evidence/issue-23-publisher-client-binding.md
+eb57467989421816a5f4a0526c81b941d0c376df811afd6e9803a7a9b364a982  tests/publisher_client_binding.rs
+4030e7e7f8020e39528969e60603563a4df0fbfa7c2909680449211bb370bb9c  tests/data/publisher-client-binding/trusted-root.json
+3c83467c6f821630ddcb667ff21ae20d5eddd7b0cb715979a6cdd5714adcb887  tests/data/publisher-client-binding/metadata/1.delegated.json
+0c756c4cfaee4be2656b2975eefbc4a40b50bbd9792cbdeeb8af45bc7d523dd7  tests/data/publisher-client-binding/metadata/1.snapshot.json
+599bc3875889620c15c8543b471d1dd3a9081a4ec357658d069dadcac1a4666a  tests/data/publisher-client-binding/metadata/1.targets.json
+155033b891103be8d1b874088f6a3efb3a1476c9d92b91f853b51721eb1f2735  tests/data/publisher-client-binding/metadata/timestamp.json
+d13ecc865c37b23650615038c232eccfa5770c8bc345dbe98db595273fecda4a  tests/data/publisher-client-binding/targets/artifact.bin
 e2b556e4e1b082a52da6d717526faa756da1fdb8eb806f2600a6f232120eef6b  evidence/issue-22-interrupted-refresh.md
 433103db14c6ac5f705ef2a0d60143552e47f72ef9cfdc4b5f47bdee4c6fc805  tests/interrupted_refresh.rs
 26773c6c52e1873974805b9f0e093f8203ef0eb2113a09d4c54ee9fc26799361  tests/interrupted_refresh_fixture/mod.rs

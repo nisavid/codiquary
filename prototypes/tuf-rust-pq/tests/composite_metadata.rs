@@ -1052,7 +1052,7 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
             targets: None,
         }],
     };
-    let artifact = b"codiquary issue 20 fixture\n";
+    let artifact = include_bytes!("data/publisher-client-binding/targets/artifact.bin");
     let artifact_target = Target {
         length: artifact.len() as u64,
         hashes: Hashes {
