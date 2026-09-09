@@ -299,6 +299,8 @@ After applying the main source patch above, verify and apply the test-workspace
 inputs:
 
 ```sh
+cd "$tuf278_root"
+
 sha256sum -c <<'CHECKSUMS'
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
