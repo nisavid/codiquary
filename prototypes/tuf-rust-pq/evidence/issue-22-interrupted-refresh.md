@@ -54,6 +54,20 @@ as `candidate`: timestamp, snapshot, targets, and delegated metadata were all
 v2. This execution matched both predictions. The fixture records this computed
 observation without requiring it to match the predicted fresh-load outcome.
 
+The fresh child keeps loader completion separate from harness completion.
+Required paths, trusted-root reads, URL construction, runtime setup, accepted
+repository inspection, receipt writes, timeouts, and process failures remain
+fixture failures. Once `RepositoryLoader::load` returns, the child records
+either `accepted` with the observed `Repository` and its
+previous/candidate/neither classification, or `nonAcceptance` with
+classification `neither` and the actual Tough error display, debug value, and
+error chain. `nonAcceptance` means only that Tough returned no `Repository`; it
+does not claim that the error proves cryptographically invalid metadata. A
+separate fixture-harness test replaces only a disposable source copy's snapshot
+with malformed bytes and confirms that this completed rejection is recorded
+instead of being mistaken for process failure. It is not another TUF
+qualification case.
+
 Each run prints the actual `rawObservation` receipt path. By default, the
 receipt is written inside the run's fresh disposable workspace and removed
 with that workspace. Set `CODIQUARY_22_OUTPUT_DIR` to a fresh directory to

@@ -21,7 +21,8 @@ const CHILD_TARGETS: &str = "CODIQUARY_22_CHILD_TARGETS";
 const CHILD_DATASTORE: &str = "CODIQUARY_22_CHILD_DATASTORE";
 const CHILD_RECEIPT: &str = "CODIQUARY_22_CHILD_RECEIPT";
 const OUTPUT_DIR: &str = "CODIQUARY_22_OUTPUT_DIR";
-const TEST_NAME: &str = "observes_one_interrupted_tough_metadata_refresh";
+const OBSERVATION_TEST_NAME: &str = "observes_one_interrupted_tough_metadata_refresh";
+const NON_ACCEPTANCE_TEST_NAME: &str = "records_completed_loader_non_acceptance";
 const PHASE_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -119,6 +120,54 @@ pub fn observe() -> Result<(), BoxError> {
         .block_on(parent_observe())
 }
 
+pub fn record_completed_loader_non_acceptance() -> Result<(), BoxError> {
+    if std::env::var_os(CHILD_MODE).is_some() {
+        return child_observe();
+    }
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(parent_record_completed_loader_non_acceptance())
+}
+
+async fn parent_record_completed_loader_non_acceptance() -> Result<(), BoxError> {
+    let workspace = DisposableDirectory::new()?;
+    let root_path = workspace.path.join("trusted-root.json");
+    let source = workspace.path.join("malformed-source");
+    let targets = workspace.path.join("targets");
+    let datastore = workspace.path.join("datastore");
+    fs::create_dir(&source)?;
+    fs::create_dir(&targets)?;
+    fs::create_dir(&datastore)?;
+
+    let inputs = synthetic_inputs()?;
+    fs::write(&root_path, &inputs.root)?;
+    write_source(&source, &inputs.v2)?;
+    fs::write(source.join("2.snapshot.json"), b"not JSON metadata")?;
+
+    let receipt_path = workspace.path.join("completed-loader.json");
+    let mut child = spawn_loader_child(
+        NON_ACCEPTANCE_TEST_NAME,
+        &root_path,
+        &source,
+        &targets,
+        &datastore,
+        &receipt_path,
+    )?;
+    wait_for_fixture_child(&mut child, "completed-loader rejection diagnostic")?;
+    let observation: serde_json::Value = serde_json::from_slice(&fs::read(receipt_path)?)?;
+    if observation["completion"] != "nonAcceptance"
+        || observation["classification"] != "neither"
+        || !observation["error"]["display"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    {
+        return Err(format!("completed loader rejection was not captured: {observation}").into());
+    }
+    Ok(())
+}
+
 fn child_observe() -> Result<(), BoxError> {
     let root = required_path(CHILD_ROOT)?;
     let source = required_path(CHILD_SOURCE)?;
@@ -126,14 +175,30 @@ fn child_observe() -> Result<(), BoxError> {
     let datastore = required_path(CHILD_DATASTORE)?;
     let receipt = required_path(CHILD_RECEIPT)?;
     let root_bytes = fs::read(root)?;
-
-    let observation = tokio::runtime::Builder::new_current_thread()
+    let source_url = format!("file://{}/", source.canonicalize()?.display()).parse()?;
+    let targets_url = format!("file://{}/", targets.canonicalize()?.display()).parse()?;
+    let loader = RepositoryLoader::new(&root_bytes, source_url, targets_url)
+        .transport(FilesystemTransport)
+        .datastore(datastore);
+    let load_result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(async {
-            let repository = load_repository(&root_bytes, &source, &targets, &datastore).await?;
-            repository_observation(&repository)
-        })?;
+        .block_on(loader.load());
+    let observation = match load_result {
+        Ok(repository) => {
+            let repository = repository_observation(&repository)?;
+            serde_json::json!({
+                "completion": "accepted",
+                "classification": repository["acceptedState"],
+                "repository": repository,
+            })
+        }
+        Err(error) => serde_json::json!({
+            "completion": "nonAcceptance",
+            "classification": "neither",
+            "error": error_record(&error),
+        }),
+    };
     write_json(&receipt, &observation)?;
     Ok(())
 }
@@ -183,6 +248,7 @@ async fn parent_observe() -> Result<(), BoxError> {
 
     let interrupted_receipt_path = workspace.path.join("interrupted-child.json");
     let mut interrupted_child = spawn_loader_child(
+        OBSERVATION_TEST_NAME,
         &root_path,
         &interrupted_source,
         &targets,
@@ -239,6 +305,7 @@ async fn parent_observe() -> Result<(), BoxError> {
 
     let fresh_receipt_path = workspace.path.join("fresh-child.json");
     let mut fresh_child = spawn_loader_child(
+        OBSERVATION_TEST_NAME,
         &root_path,
         &interrupted_source,
         &targets,
@@ -246,8 +313,8 @@ async fn parent_observe() -> Result<(), BoxError> {
         &fresh_receipt_path,
     )?;
     let fresh_pid = fresh_child.id();
-    let fresh_status = wait_for_successful_child(&mut fresh_child, "fresh loader")?;
-    let fresh_observation: serde_json::Value =
+    let fresh_status = wait_for_fixture_child(&mut fresh_child, "fresh loader")?;
+    let fresh_loader_result: serde_json::Value =
         serde_json::from_slice(&fs::read(&fresh_receipt_path)?)?;
 
     let receipt = serde_json::json!({
@@ -277,7 +344,7 @@ async fn parent_observe() -> Result<(), BoxError> {
                 "candidateSnapshotRestored": file_record("2.snapshot.json", &original_snapshot),
             },
             "freshLoad": {
-                "repository": fresh_observation,
+                "completedLoader": fresh_loader_result,
                 "process": process_record(fresh_pid, fresh_status),
                 "datastore": directory_manifest(&interrupted_datastore)?,
             },
@@ -314,7 +381,7 @@ async fn parent_observe() -> Result<(), BoxError> {
         serde_json::json!({
             "control": receipt["observations"]["uninterruptedControl"]["repository"]["acceptedState"],
             "interrupted": receipt["observations"]["interrupted"]["datastoreResidue"],
-            "freshLoad": receipt["observations"]["freshLoad"]["repository"]["acceptedState"],
+            "freshLoad": receipt["observations"]["freshLoad"]["completedLoader"]["classification"],
             "rawObservation": observation_path,
         })
     );
@@ -444,6 +511,7 @@ fn required_path(name: &str) -> Result<PathBuf, BoxError> {
 }
 
 fn spawn_loader_child(
+    test_name: &str,
     root: &Path,
     source: &Path,
     targets: &Path,
@@ -453,7 +521,7 @@ fn spawn_loader_child(
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("--exact")
-        .arg(TEST_NAME)
+        .arg(test_name)
         .arg("--nocapture")
         .env(CHILD_MODE, "load")
         .env(CHILD_ROOT, root)
@@ -504,7 +572,7 @@ fn wait_for_file(path: &Path, child: &mut ReapedChild, phase: &str) -> Result<()
     }
 }
 
-fn wait_for_successful_child(child: &mut ReapedChild, phase: &str) -> Result<ExitStatus, BoxError> {
+fn wait_for_fixture_child(child: &mut ReapedChild, phase: &str) -> Result<ExitStatus, BoxError> {
     let deadline = Instant::now() + PHASE_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait()? {
@@ -518,6 +586,20 @@ fn wait_for_successful_child(child: &mut ReapedChild, phase: &str) -> Result<Exi
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn error_record(error: &(dyn Error + 'static)) -> serde_json::Value {
+    let mut chain = Vec::new();
+    let mut current = Some(error);
+    while let Some(item) = current {
+        chain.push(item.to_string());
+        current = item.source();
+    }
+    serde_json::json!({
+        "display": error.to_string(),
+        "debug": format!("{error:?}"),
+        "chain": chain,
+    })
 }
 
 fn write_source(directory: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), BoxError> {
