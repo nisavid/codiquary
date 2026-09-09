@@ -48,9 +48,14 @@ that layout is not the current replay input.
 The patch changes the shared Tough maintenance surface in four connected
 places:
 
-- The metadata key-map deserializer validates the provisional OpenPGP profile
-  before accepting any OpenPGP key, including an unused key.
-- Direct OpenPGP signature verification retains the same profile validation.
+- The metadata key-map deserializer structurally validates every OpenPGP key,
+  including unused keys: it accepts only recognized wire labels and decodable
+  public bytes, rejects undefined outer and `keyval` fields through
+  `validate_metadata_profile`, and requires a matching, nonduplicate key ID.
+- When an OpenPGP key is selected, signature verification additionally checks
+  canonical certificate and signature encodings, the v6 algorithm-30 and sole
+  eligible signing-key constraints, the SHA-512 binary signature and issuer
+  fingerprint, and successful composite verification.
 - `Key::verify` returns a threshold identity after successful verification.
   Existing RSA, Ed25519, and ECDSA keys retain their authorized TUF key ID;
   the provisional composite OpenPGP key uses its verified v6 signing-key

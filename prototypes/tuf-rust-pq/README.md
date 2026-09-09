@@ -34,11 +34,15 @@ revision. This is not an operator, custody, underlying-component independence,
 or broader cryptographic audit claim.
 
 A second independent review found that the undefined-field check still ran
-only for a key selected to verify a signature. The patch moves that profile
-validation to the shared metadata key-map deserializer and retains it in direct
-verification. The current maintenance replay covers that ingestion change, the
-shared root and delegation threshold-verification change, and the conventional
-ECDSA identity behavior retained through both public threshold loops. See the
+only for a key selected to verify a signature. The patch moves that
+extension-field check to the shared metadata key-map deserializer and retains
+it in direct verification. Despite its name, `validate_metadata_profile`
+checks only that the provisional OpenPGP outer and `keyval` extension maps are
+empty. Complete certificate, signing-key, encoding, algorithm, and signature
+validation runs when the key is selected for verification. The current
+maintenance replay covers that ingestion change, the shared root and
+delegation threshold-verification change, and the conventional ECDSA identity
+behavior retained through both public threshold loops. See the
 [current Tough compatibility evidence](evidence/current-compatibility.md).
 Final verification and focused maintenance review are tracked in
 [Correct and replay the current Tough compatibility record](https://github.com/nisavid/codiquary/issues/24).

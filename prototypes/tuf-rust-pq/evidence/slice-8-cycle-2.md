@@ -2,30 +2,31 @@
 
 ## Boundary decision
 
-The active `RR2-CHECKPOINT-OPENPGP-PROFILE-BOUNDARY` is resolved at the
-shared metadata key-map ingestion boundary. Every provisional OpenPGP key in a
-Root or Delegations key map must satisfy the closed profile before the
-containing metadata value can be constructed, including keys that no role
-authorizes and no signature uses. `Key::verify` retains the same validation as
-defense for keys constructed directly in memory.
+The earlier metadata-wide complete-profile description is superseded.
+Root and Delegations key-map ingestion performs structural validation:
+deserialization recognizes the key type and scheme and decodes the public
+bytes; `validate_metadata_profile` rejects undefined provisional OpenPGP outer
+and `keyval` fields; and `deserialize_keys` requires a matching key ID and no
+duplicate key ID. These checks apply to every key-map entry, including unused
+keys.
 
-This is the earliest common boundary already shared by Root and Delegations.
-It closes the unused-key acceptance path without changing key-ID derivation,
-canonical signed bytes, the accepted RFC 9980 certificate and signature
-profile, threshold identity, or the root and delegation verification state
-machines. A signer-local check alone cannot enforce the settled requirement
-because metadata may contain provisional OpenPGP keys that verification never
-selects.
+Complete cryptographic-profile validation occurs when a key is selected for
+signature verification. It checks canonical certificate and signature
+encodings, a v6 algorithm-30 key, the sole eligible signing key, a SHA-512
+binary signature, its issuer fingerprint, and successful composite
+verification. An unused certificate may therefore be structurally accepted
+without satisfying that profile, but it cannot contribute to a signature
+threshold.
 
 The frozen Cycle 2 review inputs and outputs remain historical and unchanged.
 
 ## Finding dispositions
 
 - `RR2-OPENPGP-EXTRA-VALIDATION-001` is corrected pending independent review.
-  `deserialize_keys` now validates the provisional OpenPGP profile before
-  calculating or inserting every key ID. Root and Delegations both use this
-  deserializer. `Key::verify` calls the same validator for directly constructed
-  keys.
+  `deserialize_keys` now rejects undefined provisional OpenPGP outer and
+  `keyval` fields before calculating or inserting every key ID. Root and
+  Delegations both use this deserializer. `Key::verify` repeats this
+  extension-field check before applying the complete cryptographic profile.
 - `RR2-BEHAVIORAL-RED-PROVENANCE-001` is corrected. The historical evidence is
   explicitly labeled as summary material below and in
   [the Slice 5 record](slice-5-threshold-identity.md). A new reproducible
@@ -103,8 +104,9 @@ insertions and 16 deletions. Relative to the reviewed 11,405-byte patch, it
 adds two files to the patch surface, 20 insertions, one deletion, and 1,716
 patch bytes:
 
-- `schema::key::Key::validate_metadata_profile` owns the provisional profile
-  check shared by parsing and direct signature verification.
+- `schema::key::Key::validate_metadata_profile` checks only that provisional
+  OpenPGP outer and `keyval` extension maps are empty; parsing and direct
+  signature verification share that check.
 - `schema::de::deserialize_keys` calls it for every key-map value before
   metadata construction.
 - `schema::error::Error` gains an invalid-key profile error for the parsing
@@ -166,8 +168,9 @@ locked, offline boundary.
 - A clean replay applied the patch to the pristine pinned Tough source and
   matched all five modified source files and the captured patch byte-for-byte.
 
-At this checkpoint, the metadata-wide boundary was implemented and the pinned
-Tough suite still needed the preparation and inspection above. That
+At this checkpoint, the extension-field ingestion boundary was implemented but
+was described too broadly as metadata-wide complete-profile validation. The
+pinned Tough suite still needed the preparation and inspection above. That
 compatibility work is now corrected pending independent review, as recorded in
 the [current compatibility record](current-compatibility.md). Independent
 review has not passed. All later all-role, clock, durable
