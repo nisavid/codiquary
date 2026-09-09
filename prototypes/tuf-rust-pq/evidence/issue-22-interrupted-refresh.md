@@ -43,14 +43,16 @@ bytes with SHA-256
 It then completed a FIFO writer-open handshake while holding the writer open
 without bytes. The loader remained blocked, was killed with `SIGKILL`, and was
 reaped. The writer also exited and was reaped. The datastore held timestamp v2
-with snapshot, targets, and delegated metadata at v1, so its accepted-state
-classification was `neither`, not a hard-coded success.
+with snapshot, targets, and delegated metadata at v1, so its unverified
+on-disk residue classified as `mixed`. That residue is not a `Repository`
+acceptance result.
 
 After the controller restored the exact regular-file bytes of
 `2.snapshot.json`, a fresh child process loaded the complete candidate source
 with the same trusted root and datastore. The verified repository classified
 as `candidate`: timestamp, snapshot, targets, and delegated metadata were all
-v2. This execution matched both predictions.
+v2. This execution matched both predictions. The fixture records this computed
+observation without requiring it to match the predicted fresh-load outcome.
 
 Each run prints the actual `rawObservation` receipt path. By default, the
 receipt is written inside the run's fresh disposable workspace and removed

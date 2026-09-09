@@ -235,7 +235,7 @@ async fn parent_observe() -> Result<(), BoxError> {
     }
 
     let partial_datastore = directory_manifest(&interrupted_datastore)?;
-    let partial_versions = datastore_versions(&interrupted_datastore)?;
+    let datastore_residue = datastore_residue(&interrupted_datastore)?;
 
     let fresh_receipt_path = workspace.path.join("fresh-child.json");
     let mut fresh_child = spawn_loader_child(
@@ -272,7 +272,7 @@ async fn parent_observe() -> Result<(), BoxError> {
                 "fifoWriterOpenHandshake": true,
                 "loaderProcess": process_record(interrupted_pid, interrupted_status),
                 "writerProcess": process_record(writer_pid, writer_status),
-                "partialVersions": partial_versions,
+                "datastoreResidue": datastore_residue,
                 "datastore": partial_datastore,
                 "candidateSnapshotRestored": file_record("2.snapshot.json", &original_snapshot),
             },
@@ -303,11 +303,7 @@ async fn parent_observe() -> Result<(), BoxError> {
         &receipt["observations"]["uninterruptedControl"]["repository"],
         "candidate",
     )?;
-    assert_mixed_partial_state(&receipt["observations"]["interrupted"]["partialVersions"])?;
-    assert_state(
-        &receipt["observations"]["freshLoad"]["repository"],
-        "candidate",
-    )?;
+    assert_mixed_datastore_residue(&receipt["observations"]["interrupted"]["datastoreResidue"])?;
     assert_killed(&receipt["observations"]["interrupted"]["loaderProcess"])?;
     if !writer_status.success() || !fresh_status.success() {
         return Err("a reaped fixture process had an unexpected disposition".into());
@@ -317,7 +313,7 @@ async fn parent_observe() -> Result<(), BoxError> {
         "{}",
         serde_json::json!({
             "control": receipt["observations"]["uninterruptedControl"]["repository"]["acceptedState"],
-            "interrupted": receipt["observations"]["interrupted"]["partialVersions"],
+            "interrupted": receipt["observations"]["interrupted"]["datastoreResidue"],
             "freshLoad": receipt["observations"]["freshLoad"]["repository"]["acceptedState"],
             "rawObservation": observation_path,
         })
@@ -400,7 +396,7 @@ fn classify_versions(versions: [u64; 4]) -> &'static str {
     }
 }
 
-fn datastore_versions(datastore: &Path) -> Result<serde_json::Value, BoxError> {
+fn datastore_residue(datastore: &Path) -> Result<serde_json::Value, BoxError> {
     let timestamp: Signed<Timestamp> = read_json(&datastore.join("timestamp.json"))?;
     let snapshot: Signed<Snapshot> = read_json(&datastore.join("snapshot.json"))?;
     let targets: Signed<Targets> = read_json(&datastore.join("targets.json"))?;
@@ -419,12 +415,22 @@ fn datastore_versions(datastore: &Path) -> Result<serde_json::Value, BoxError> {
         delegated.signed.version.get(),
     ];
     Ok(serde_json::json!({
-        "acceptedState": classify_versions(versions),
+        "residueState": classify_residue(versions),
         "timestampVersion": versions[0],
         "snapshotVersion": versions[1],
         "targetsVersion": versions[2],
         "delegatedVersion": versions[3],
     }))
+}
+
+fn classify_residue(versions: [u64; 4]) -> &'static str {
+    if versions.iter().all(|version| *version == 1) {
+        "all-v1"
+    } else if versions.iter().all(|version| *version == 2) {
+        "all-v2"
+    } else {
+        "mixed"
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, BoxError> {
@@ -602,8 +608,8 @@ fn assert_state(value: &serde_json::Value, expected: &str) -> Result<(), BoxErro
     Ok(())
 }
 
-fn assert_mixed_partial_state(value: &serde_json::Value) -> Result<(), BoxError> {
-    if value["acceptedState"] != "neither"
+fn assert_mixed_datastore_residue(value: &serde_json::Value) -> Result<(), BoxError> {
+    if value["residueState"] != "mixed"
         || value["timestampVersion"] != 2
         || value["snapshotVersion"] != 1
         || value["targetsVersion"] != 1

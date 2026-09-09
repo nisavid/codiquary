@@ -116,9 +116,9 @@ b2ae11447744e91adcb6ba222d6bfddbf7787e1a76e8fe60f0655e8444ea810d  src/experiment
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
 3d99bf889e1990f97188aaad568d9a73b8f4ff3b06d7f6946489012b737bf7e4  tests/composite_metadata.rs
-1ff98352ab728e1e749da7eb1a468c9b04299b4d76b780cafc1b57480fcf6046  evidence/issue-22-interrupted-refresh.md
+3dfbba44efef76795a24c849c5f8b4918d93582efafa1c5cb10ef5984adbce10  evidence/issue-22-interrupted-refresh.md
 881c821ef24bc169a33458784cc50b30d4c3ddcf9f1667e241e04c331595e323  tests/interrupted_refresh.rs
-64e25259f6d810a2a0ac1be80a1e495be7c1345c93ad114dbe4148299006e6cf  tests/interrupted_refresh_fixture/mod.rs
+8c75db445f04d59ecf4fba19b5633f3ad554cd9a779fe01f8b107e49592b08cb  tests/interrupted_refresh_fixture/mod.rs
 5023f44894b2a7c434138a2b8a5ae3c2216f217f74eff87ee999a11e21552e90  tests/data/interrupted-refresh/trusted-root.json
 f28da9a44f7364d572ede28460a7a0fdab56f2c6a3f081e8cd0ff08f3cd7afa0  tests/data/interrupted-refresh/v1/1.delegated.json
 e2756c673c0a345917b31a6e2e2cf0ac65c47cbdbae76bfdb8317c2f48dc4697  tests/data/interrupted-refresh/v1/1.snapshot.json
@@ -251,6 +251,8 @@ The test establishes v1, loads an uninterrupted v2 control in a separate
 clone, interrupts a fixture child only after the v2 timestamp and FIFO-open
 phases are proven, restores the complete candidate source, and classifies the
 verified fresh-process result.
+
+From the repository root, rather than this prototype directory, run:
 
 ```sh
 rustup run 1.98.1 cargo test \
