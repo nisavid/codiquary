@@ -11,6 +11,9 @@ Delegations metadata is accepted, including when the key is unused. The
 all-role fixture binds serialized role bytes through snapshot and timestamp
 Metafiles and traverses a delegated hashed target. The experimental profile
 fixture is documented in [evidence/experimental-profile.md](evidence/experimental-profile.md).
+The separate [interrupted-refresh observation](evidence/issue-22-interrupted-refresh.md)
+uses fixed public metadata to record one process interruption at Tough's
+existing datastore/filesystem seam.
 
 > [!CAUTION]
 > This is one synthetic publisher/verifier seam, not a production security
@@ -113,6 +116,18 @@ b2ae11447744e91adcb6ba222d6bfddbf7787e1a76e8fe60f0655e8444ea810d  src/experiment
 8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
 8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
 3d99bf889e1990f97188aaad568d9a73b8f4ff3b06d7f6946489012b737bf7e4  tests/composite_metadata.rs
+1ff98352ab728e1e749da7eb1a468c9b04299b4d76b780cafc1b57480fcf6046  evidence/issue-22-interrupted-refresh.md
+881c821ef24bc169a33458784cc50b30d4c3ddcf9f1667e241e04c331595e323  tests/interrupted_refresh.rs
+64e25259f6d810a2a0ac1be80a1e495be7c1345c93ad114dbe4148299006e6cf  tests/interrupted_refresh_fixture/mod.rs
+5023f44894b2a7c434138a2b8a5ae3c2216f217f74eff87ee999a11e21552e90  tests/data/interrupted-refresh/trusted-root.json
+f28da9a44f7364d572ede28460a7a0fdab56f2c6a3f081e8cd0ff08f3cd7afa0  tests/data/interrupted-refresh/v1/1.delegated.json
+e2756c673c0a345917b31a6e2e2cf0ac65c47cbdbae76bfdb8317c2f48dc4697  tests/data/interrupted-refresh/v1/1.snapshot.json
+8e78b164313efe2699caa61154bba0ad9951186f95c6ae2462c449870ebf2ab1  tests/data/interrupted-refresh/v1/1.targets.json
+54b539221e480c8c538e3383e8a49a4871030c4678481557140da29febd72a9a  tests/data/interrupted-refresh/v1/timestamp.json
+cd1bd57f3c7451b1e32f50c9181e7da682b5deeddf4cd2f38e75a5daa083c43e  tests/data/interrupted-refresh/v2/2.delegated.json
+16cb6c561569d06c75c4693981b2a81c7f5fe86be508dde35fab61316409bf95  tests/data/interrupted-refresh/v2/2.snapshot.json
+6ed4c83f0c2600bdeff8cf977a30a2b120f2c7a5ff6e9cbf5fc7c97bde8fbe96  tests/data/interrupted-refresh/v2/2.targets.json
+59e734efdb3afd0b51f49ec1fdfc9ecd85545f78e804b7d0a84b1d4d67fee312  tests/data/interrupted-refresh/v2/timestamp.json
 CHECKSUMS
 
 git -C .scratch/tough apply --check \
@@ -228,6 +243,28 @@ The [historical compatibility record](evidence/current-compatibility.md),
 [original red/green record](evidence/slice-3-red-green.md) preserve their
 historical checkpoints.
 
+## Replay the interrupted-refresh observation
+
+The fixed, public v1/v2 input and exact hashes are recorded in the
+[interrupted-refresh observation](evidence/issue-22-interrupted-refresh.md).
+The test establishes v1, loads an uninterrupted v2 control in a separate
+clone, interrupts a fixture child only after the v2 timestamp and FIFO-open
+phases are proven, restores the complete candidate source, and classifies the
+verified fresh-process result.
+
+```sh
+rustup run 1.98.1 cargo test \
+  --manifest-path prototypes/tuf-rust-pq/Cargo.toml \
+  --locked --offline --test interrupted_refresh -- --nocapture
+```
+
+The command prints the actual `rawObservation` receipt path. By default, the
+receipt is written inside the run's fresh disposable workspace and removed
+with that workspace. Set `CODIQUARY_22_OUTPUT_DIR` to a fresh directory to
+retain the full raw receipt, including nondeterministic
+`latest_known_time.json` bytes. For example, prefix the command with
+`CODIQUARY_22_OUTPUT_DIR="$(mktemp -d)"`.
+
 ## Replay the historical applicable Tough suite
 
 This separate replay does not qualify the current profile candidate. The
@@ -287,9 +324,10 @@ compatibility record binds that command and its outputs by SHA-256.
 The current fixture covers the root publisher/verifier seam, the composite
 threshold-identity boundary in root and delegation verification, all four
 top-level role shapes, one delegated role with a hashed target, serialized
-snapshot/timestamp references, and a closed typed experimental profile matched
-against those observations. It does not decide lifecycle policy: expiry,
-rollback, accepted time, root bootstrap, consistent snapshots, durable refresh
-or crash recovery, target confinement, metadata limits, held-byte policy
+snapshot/timestamp references, a closed typed experimental profile matched
+against those observations, and one interrupted datastore refresh with a
+complete source available after restart. It does not decide lifecycle policy:
+expiry, rollback, accepted time, root bootstrap, consistent snapshots, durable
+power-loss recovery, target confinement, metadata limits, held-byte policy
 composition, consumer transport, macOS qualification, or operator/custody
 independence remain later work.
