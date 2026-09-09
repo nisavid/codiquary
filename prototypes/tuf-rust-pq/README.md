@@ -30,32 +30,29 @@ a domain-separated threshold identity from signature verification. Existing key
 types retain TUF-key-ID identity; this provisional OpenPGP profile uses the
 verified v6 signing-key fingerprint. Root and delegation verifiers count each
 identity once. The historical review evidence remains bound to its recorded
-revision. Revision-bound review evidence for the profile correction is tracked
-in [issue 21](https://github.com/nisavid/codiquary/issues/21). This is not an
-operator, custody, underlying-component independence, or broader cryptographic
-audit claim.
+revision. This is not an operator, custody, underlying-component independence,
+or broader cryptographic audit claim.
 
 A second independent review found that the undefined-field check still ran
-only for a key selected to verify a signature. The current patch moves that
-profile validation to the shared metadata key-map deserializer and retains it
-in direct verification. The correction has new reproducible red/green
-evidence. The applicable pinned Tough default suite passed at the recorded
-historical revision, and two focused ECDSA regressions exercised the
-conventional `Key::verify` identity through both public threshold loops. The
-compatibility record still says that independent review is pending and does not
-describe this candidate. See the
-[historical compatibility record](evidence/current-compatibility.md).
+only for a key selected to verify a signature. The patch moves that profile
+validation to the shared metadata key-map deserializer and retains it in direct
+verification. The current maintenance replay covers that ingestion change, the
+shared root and delegation threshold-verification change, and the conventional
+ECDSA identity behavior retained through both public threshold loops. See the
+[current Tough compatibility evidence](evidence/current-compatibility.md).
+Final verification and focused maintenance review are tracked in
+[Correct and replay the current Tough compatibility record](https://github.com/nisavid/codiquary/issues/24).
 
-Those historical prototype and Tough results were observed on
-`x86_64-unknown-linux-gnu` with Rust and Cargo 1.98.1 and external OpenSSL
-3.6.3. An earlier Tough run used the host's Rust and Cargo 1.98.0 and remains
-only as superseded diagnostic evidence. The Sequoia backend requires OpenSSL
-3.5 or newer. macOS remains unexecuted.
+The current replay was observed at executable input revision
+`298fd26fe44a759da54d3fe8ef9fb34446c4c981` on
+`x86_64-unknown-linux-gnu` with Rust, Cargo, and rustdoc 1.98.1 and external
+OpenSSL 3.6.3. The Sequoia backend requires OpenSSL 3.5 or newer. macOS remains
+unexecuted.
 
 ## Prerequisites
 
 - Git and GNU `sha256sum`
-- Rust and Cargo 1.98.1
+- Rust, Cargo, and rustdoc 1.98.1
 - OpenSSL 3.5 or newer, including headers and `pkg-config` metadata
 - A C/C++ toolchain, CMake, `pkg-config`, and libclang for the inspected native
   build surface
@@ -156,9 +153,14 @@ CHECKSUMS
 
 ## Fetch and inspect without executing dependencies
 
-Create disposable Cargo, target, and temporary directories. `cargo fetch
---locked` may contact crates.io but cannot update `Cargo.lock`; the target flag
-limits retrieval to the observed Linux graph.
+The repository's `.cargo/config.toml` sets `net.offline = true`. Only the
+network-permitted fetch commands below override that setting with
+`CARGO_NET_OFFLINE=false`; the repository configuration is not changed. All
+subsequent metadata, graph, build, and test commands remain locked and offline.
+An empty-cache fetch without this command-local override exits 101.
+
+Create disposable Cargo, target, and temporary directories. No disposable
+`HOME` directory or `HOME` setting is used.
 
 ```sh
 tuf278_root="$(pwd -P)"
@@ -171,6 +173,7 @@ env -i \
   PATH="$tuf278_toolchain_bin:/usr/bin:/bin" \
   CARGO_HOME="$tuf278_run/cargo-home" \
   CARGO_TERM_COLOR=never \
+  CARGO_NET_OFFLINE=false \
   "$tuf278_cargo" fetch --locked --target x86_64-unknown-linux-gnu
 
 env -i \
@@ -182,15 +185,16 @@ env -i \
   >"$tuf278_run/metadata.json"
 ```
 
-Before executing fetched code, use the metadata and `Cargo.lock` to complete the
-same bounded inspection:
+Before executing fetched code, use the metadata and `Cargo.lock` to complete
+the same bounded inspection:
 
 1. Account for 189 selected packages: 184 registry packages and five path
-   packages.
+   packages. The executable graph has 181 reachable packages.
 2. Verify all 184 selected registry archives against their lockfile SHA-256
    checksums.
 3. Read every selected manifest. Inspect the entry point and included modules
-   for all 30 custom-build packages, then inspect all 16 proc-macro source trees.
+   for all 30 custom-build packages, then inspect all 16 proc-macro source
+   trees.
 4. Confirm the build scripts invoke only the expected local Rust, C/C++, CMake,
    `pkg-config`, bindgen, LALRPOP, and linker tools, with generated output under
    Cargo's build directory.
@@ -199,26 +203,33 @@ The recorded review used targeted capability scans plus manual source reading;
 it was not a full security audit. Its inventory digests and source findings are
 in [the source/build inspection](evidence/source-build-inspection.md).
 
-That 189-package inventory covers the prototype command below. The applicable
-Tough normal/build/dev graph was separately resolved with the pinned Sequoia
-path source. Of its 263 reachable packages, 145 package name/version pairs were
-new relative to the prototype inventory. Their registry archives, manifests,
-build scripts, and proc macros were inspected before the locked offline suite
-ran. The exact historical graph, lock, results, and limits are in the
-[historical compatibility record](evidence/current-compatibility.md).
+For this maintenance replay, the selected registry trees were byte-identical
+to the retained inspected trees, every archive matched its active lock
+checksum, and the path-package trees, locks, target, Tough patch, workspace
+override, and feature boundary matched. That permitted reuse of the retained
+feature-sensitive inspection. A future replay must revalidate the actual source
+bytes and resolved graph; any delta must be inspected before execution.
+
+The applicable Tough graph contains 263 reachable packages, including 258
+registry packages, 39 custom-build packages, and 19 proc-macro packages. The
+retained comparison identifies 145 package name/version pairs newly selected
+relative to the prototype inventory. The exact graph, lock, results, and limits
+are recorded in the [current Tough compatibility evidence](evidence/current-compatibility.md).
 
 ## Run the tested slice
 
-First confirm that Bubblewrap can create a private network namespace:
+First confirm that Bubblewrap can create its isolated namespaces:
 
 ```sh
-bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net \
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all \
   --die-with-parent --new-session /usr/bin/true
 ```
 
-If that probe succeeds, the following command gives the source a read-only view
-of the host, makes only the three disposable directories writable, starts with
-an empty environment, and runs Cargo from the pre-fetched cache without network
+The maintenance probe and replay succeeded with `--unshare-all`; the parent and
+sandbox network namespace identifiers differed. The command below gives the
+source a read-only view of the host, makes only the three disposable directories
+writable, starts with an empty environment, selects Cargo, rustc, and rustdoc by
+resolved toolchain path, and runs from the pre-fetched cache without network
 access:
 
 ```sh
@@ -227,32 +238,30 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all \
   --bind "$tuf278_run/target" "$tuf278_run/target" \
   --bind "$tuf278_run/tmp" "$tuf278_run/tmp" \
   --chdir "$tuf278_root" --die-with-parent --new-session \
-  env -i \
+  /usr/bin/env -i \
     PATH="$tuf278_toolchain_bin:/usr/bin:/bin" \
+    RUSTC="$tuf278_toolchain_bin/rustc" \
+    RUSTDOC="$tuf278_toolchain_bin/rustdoc" \
     CARGO_HOME="$tuf278_run/cargo-home" \
     CARGO_TARGET_DIR="$tuf278_run/target" \
     CARGO_TERM_COLOR=never \
     TMPDIR="$tuf278_run/tmp" \
-    "$tuf278_cargo" test --locked --offline \
+    "$tuf278_toolchain_bin/cargo" test --locked --offline \
       --test composite_metadata -- --nocapture
 ```
 
-On the reviewed host, the private-network probe failed before code ran because
-the host denied Bubblewrap's `NETLINK_ROUTE` socket. The recorded green run used
-`--unshare-all --share-net` only inside a parent harness that already denied
-network access. Use that substitution only after independently verifying the
-parent network denial; otherwise the replay prerequisite is unsatisfied.
-
-The command reports its integration-test count and exercises the deterministic
-experimental-profile and all-role metadata-chain fixtures. Its generated key
-ID and fingerprint vary by run. Revision-bound command outputs, counts, hashes,
-and the final source revision belong in
-[issue 21](https://github.com/nisavid/codiquary/issues/21) and its pull request.
-The [historical compatibility record](evidence/current-compatibility.md),
-[Cycle 2 record](evidence/slice-8-cycle-2.md),
+At executable input revision
+`298fd26fe44a759da54d3fe8ef9fb34446c4c981`, this command passed 15 tests,
+failed 0, and ignored 0. Its raw command/output SHA-256 values are
+`9fd26dad372c57b5eb132152791a1293ebab3a6188aec509bf75437ba34dae26`
+and `f8b74dee0be02ae213821f980c61483779f1a0cd6b7d4790adf723c81a3f4b5c`.
+Generated key IDs and fingerprints vary by run. Final-revision verification and
+focused review belong in
+[Correct and replay the current Tough compatibility record](https://github.com/nisavid/codiquary/issues/24).
+The [Cycle 2 record](evidence/slice-8-cycle-2.md),
 [threshold-identity record](evidence/slice-5-threshold-identity.md), and
-[original red/green record](evidence/slice-3-red-green.md) preserve their
-historical checkpoints.
+[original red/green record](evidence/slice-3-red-green.md) remain historical
+checkpoints.
 
 ## Replay the interrupted-refresh observation
 
@@ -282,15 +291,17 @@ retain the full raw receipt, including nondeterministic
 `latest_known_time.json` bytes. For example, prefix the command with
 `CODIQUARY_22_OUTPUT_DIR="$(mktemp -d)"`.
 
-## Replay the historical applicable Tough suite
+## Replay the applicable Tough suite
 
-This separate replay does not qualify the current profile candidate. The
-patched Sequoia edge needs a workspace source override and its ordinary
-Cargo-resolved test lock; the pristine upstream lock is not the historically
-executed lock. After applying the main source patch above, apply the replay
+After applying the main source patch above, verify and apply the test-workspace
 inputs:
 
 ```sh
+sha256sum -c <<'CHECKSUMS'
+8720ad3dd63c05109761b624922248b94a938205a1d43987032d93e73377100c  patches/tough-default-sequoia-source.patch
+8951066c56b6f1fbbc391aedcdf6e15322f88356ff0f2d4d04b3ebf926fbe268  evidence/tough-default.Cargo.lock
+CHECKSUMS
+
 git -C .scratch/tough apply --check \
   ../../patches/tough-default-sequoia-source.patch
 git -C .scratch/tough apply \
@@ -302,39 +313,53 @@ dd5807256002ffa16dfa4eba7c7db03ee3ba7daed2a74a9099b3496eda2314ba  .scratch/tough
 CHECKSUMS
 ```
 
-Fetch the locked Linux test graph without building it. Before execution,
-repeat the bounded graph-delta inspection in the
-[historical compatibility record](evidence/current-compatibility.md).
+Fetch the locked Linux test graph without building it. This is the only Tough
+replay command that overrides the repository's offline default:
 
 ```sh
-tuf278_tough_cargo="$(rustup which --toolchain 1.98.1 cargo)"
-tuf278_tough_toolchain_bin="$(dirname "$tuf278_tough_cargo")"
 env -i \
-  PATH="$tuf278_tough_toolchain_bin:/usr/bin:/bin" \
+  PATH="$tuf278_toolchain_bin:/usr/bin:/bin" \
   CARGO_HOME="$tuf278_run/cargo-home" \
   CARGO_TERM_COLOR=never \
-  "$tuf278_tough_cargo" fetch --locked \
+  CARGO_NET_OFFLINE=false \
+  "$tuf278_toolchain_bin/cargo" fetch --locked \
     --manifest-path .scratch/tough/tough/Cargo.toml \
     --target x86_64-unknown-linux-gnu
 ```
 
-Then use the same empty-environment, read-only-source, offline sandbox and run
-the following direct Cargo invocation. Resolve the binary path before entering
-the empty environment so the command does not depend on a rustup shim or home
-configuration.
+Revalidate the resolved graph and retained inspection as described above, then
+run the exact offline replay:
 
 ```sh
-tuf278_tough_cargo="$(rustup which --toolchain 1.98.1 cargo)"
-"$tuf278_tough_cargo" test --locked --offline \
-  --manifest-path .scratch/tough/tough/Cargo.toml \
-  --package tough \
-  --target x86_64-unknown-linux-gnu \
-  --no-default-features
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all \
+  --bind "$tuf278_run/cargo-home" "$tuf278_run/cargo-home" \
+  --bind "$tuf278_run/target" "$tuf278_run/target" \
+  --bind "$tuf278_run/tmp" "$tuf278_run/tmp" \
+  --chdir "$tuf278_root" --die-with-parent --new-session \
+  /usr/bin/env -i \
+    PATH="$tuf278_toolchain_bin:/usr/bin:/bin" \
+    RUSTC="$tuf278_toolchain_bin/rustc" \
+    RUSTDOC="$tuf278_toolchain_bin/rustdoc" \
+    CARGO_HOME="$tuf278_run/cargo-home" \
+    CARGO_TARGET_DIR="$tuf278_run/target" \
+    CARGO_TERM_COLOR=never \
+    TMPDIR="$tuf278_run/tmp" \
+    "$tuf278_toolchain_bin/cargo" test --locked --offline \
+      --manifest-path .scratch/tough/tough/Cargo.toml \
+      --package tough \
+      --target x86_64-unknown-linux-gnu \
+      --no-default-features
 ```
 
-The recorded run passed 78 tests, failed 0, and ignored 1. No Tough feature was
-enabled; `http`, `http2`, and `integ` remain outside this slice. The historical
-compatibility record binds that command and its outputs by SHA-256.
+At executable input revision
+`298fd26fe44a759da54d3fe8ef9fb34446c4c981`, the replay passed 78 tests,
+failed 0, and ignored 1. Its raw command/output SHA-256 values are
+`98ca301371e3230dbba5d3b4f1950bea1556b0f31adfadc8017b15386f499bcf`
+and `0417a6f6306a0d22f04e728fba000fd35d6d735c8bc31b5ea9624564a2dec8b6`.
+No Tough feature was enabled. The `http`, `http2`, `integ`, and `fips` feature
+profiles remain outside this replay; the zero-test HTTP target did not exercise
+HTTP behavior, and the installed integration-support packages did not expand
+the invoked package's feature boundary.
 
 ## Scope
 
@@ -343,8 +368,13 @@ threshold-identity boundary in root and delegation verification, all four
 top-level role shapes, one delegated role with a hashed target, serialized
 snapshot/timestamp references, a closed typed experimental profile matched
 against those observations, and one interrupted datastore refresh with a
-complete source available after restart. It does not decide lifecycle policy:
-expiry, rollback, accepted time, root bootstrap, consistent snapshots, durable
-power-loss recovery, target confinement, metadata limits, held-byte policy
-composition, consumer transport, macOS qualification, or operator/custody
-independence remain later work.
+complete source available after restart. The maintenance replay additionally
+checks the shared key-map ingestion validation and preserves conventional ECDSA
+TUF-key-ID threshold identity through public root and delegation verification.
+It does not decide lifecycle policy: expiry, clocks, rollback, root bootstrap
+or rotation, consistent snapshots, broader recovery semantics, durable
+power-loss recovery, target confinement, metadata limits, retained-byte
+admission, held-byte policy composition, consumer transport, installation,
+macOS qualification, production durability, TUF adoption, production
+authority, operator or custody independence, parent closure, PR integration,
+or downstream sequencing remain outside this work.
