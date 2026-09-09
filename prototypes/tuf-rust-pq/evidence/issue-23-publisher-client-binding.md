@@ -7,13 +7,13 @@ This fixture binds the synthetic publisher and one Tough-loaded client descripto
 - length: 27 bytes
 - SHA-256: `d13ecc865c37b23650615038c232eccfa5770c8bc345dbe98db595273fecda4a`
 
-The publisher assertion in `tests/composite_metadata.rs` reads those bytes with `include_bytes!` and checks the serialized target length and SHA-256. The client bootstraps from `tests/data/publisher-client-binding/trusted-root.json`, loads and verifies the single-version metadata directory through `RepositoryLoader::load`, selects the sole `artifact.bin` descriptor through `Repository::all_targets()`, and compares its length and SHA-256 with the publisher bytes. The selected descriptor is `tests/data/publisher-client-binding/metadata/1.delegated.json`.
+The publisher assertion in `tests/composite_metadata.rs` reads those bytes with `include_bytes!` and checks the serialized target length and SHA-256. The client loads and verifies the single-version metadata directory from `tests/data/publisher-client-binding/trusted-root.json`, selects the sole `artifact.bin` descriptor through `Repository::all_targets()`, and compares its length and SHA-256 with the publisher bytes. The selected descriptor is `tests/data/publisher-client-binding/metadata/1.delegated.json`.
 
-The metadata was signed once with an independently generated ephemeral synthetic composite key using the existing all-role fixture construction. Only public metadata was retained; no private signing material was written. The accepted interrupted-refresh fixtures and experiment are not inputs to the final test and remain unchanged.
+The committed fixture contains only public metadata; no private key material appears in this increment. The accepted interrupted-refresh fixtures and experiment are not inputs to the final test and remain unchanged.
 
 ## TDD and replay
 
-The focused RED run loaded the prior v1-shaped public metadata and failed on its verified `artifact.bin` SHA-256, `b8d282e2625b313262da2203a7627e82275e8b96a08ce099324275c0724dc0b0`, versus the publisher SHA-256 above. `focused-red.log` retains that expected failure. After generating the dedicated public fixture, `focused-green.log` records one passing focused test.
+In the focused RED observation, the verified `artifact.bin` SHA-256 was `b8d282e2625b313262da2203a7627e82275e8b96a08ce099324275c0724dc0b0`, while the publisher SHA-256 was `d13ecc865c37b23650615038c232eccfa5770c8bc345dbe98db595273fecda4a`; the equality assertion failed.
 
 Run the focused slice from the repository root:
 
@@ -21,7 +21,6 @@ Run the focused slice from the repository root:
 rustup run 1.98.1 cargo test \
   --manifest-path prototypes/tuf-rust-pq/Cargo.toml \
   --locked --offline \
-  --target-dir /tmp/codiquary-tuf-rust-pq-278-target \
   --test publisher_client_binding -- \
   --exact publisher_and_client_bind_exact_target_bytes --nocapture
 ```
