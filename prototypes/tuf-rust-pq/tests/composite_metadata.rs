@@ -1,31 +1,26 @@
-use async_trait::async_trait;
 use aws_lc_rs::digest::{digest, SHA256};
-use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use sequoia_openpgp as openpgp;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
 
-use openpgp::cert::{CertBuilder, CipherSuite};
-use openpgp::packet::signature::SignatureBuilder;
 use openpgp::parse::Parse;
 use openpgp::policy::StandardPolicy;
 use openpgp::serialize::SerializeInto;
-use openpgp::types::{HashAlgorithm, KeyFlags, SignatureType};
-use openpgp::{Cert, Packet, PacketPile, Profile};
+use openpgp::types::{HashAlgorithm, SignatureType};
+use openpgp::{Cert, Packet, PacketPile};
 use tough::editor::signed::SignedRole;
 use tough::key_source::KeySource;
-use tough::schema::key::{Ed25519Key, Ed25519Scheme, Key, OpenPgpKey, OpenPgpScheme};
+use tough::schema::key::{Ed25519Key, Ed25519Scheme, Key};
 use tough::schema::{
     DelegatedRole, DelegatedTargets, Delegations, Hashes, KeyHolder, Metafile, PathPattern,
     PathSet, Role, RoleKeys, RoleType, Root, Signature, Signed, Snapshot, Target, Targets,
     Timestamp,
 };
 use tough::sign::Sign;
-use tough::TargetName;
+use tough::{FilesystemTransport, IntoVec, RepositoryLoader, TargetName};
 use tuf_rust_pq_prototype::experimental_profile::{
     parse_experimental_profile, Canonicalization, ClosedExtensionHandling, DescriptorHash,
     DescriptorRequirement, DescriptorRules, DetachedSignatureEncoding, OpenPgpKeyType,
@@ -33,53 +28,12 @@ use tuf_rust_pq_prototype::experimental_profile::{
     TargetCustomHandling, ThresholdIdentity, TufSpecVersion, EXPERIMENTAL_PROFILE_JSON,
 };
 
+#[path = "support/composite_metadata_fixture.rs"]
+mod composite_metadata_fixture;
+use composite_metadata_fixture::{openpgp_key, publish_single_delegated_target, CompositeSigner};
+
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const ML_DSA_65_SIGNATURE_BYTES: usize = 3309;
-
-#[derive(Clone)]
-struct CompositeSigner {
-    cert: Cert,
-    public_projection: Vec<u8>,
-    signed_messages: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl fmt::Debug for CompositeSigner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CompositeSigner")
-            .field("fingerprint", &self.cert.fingerprint())
-            .finish_non_exhaustive()
-    }
-}
-
-impl CompositeSigner {
-    fn generate() -> openpgp::Result<Self> {
-        let (cert, _) = CertBuilder::new()
-            .set_profile(Profile::RFC9580)?
-            .set_cipher_suite(CipherSuite::MLDSA65_Ed25519)
-            .set_primary_key_flags(KeyFlags::empty().set_certification())
-            .add_userid("Disposable TUF RFC 9980 fixture <fixture.invalid>")
-            .add_signing_subkey()
-            .generate()?;
-        let public_projection = cert.clone().strip_secret_key_material().to_vec()?;
-
-        Ok(Self {
-            cert,
-            public_projection,
-            signed_messages: Arc::new(Mutex::new(Vec::new())),
-        })
-    }
-}
-
-fn openpgp_key(public_projection: Vec<u8>) -> Key {
-    Key::OpenPgp {
-        keyval: OpenPgpKey {
-            public: public_projection.into(),
-            _extra: HashMap::new(),
-        },
-        scheme: OpenPgpScheme::OpenPgpRfc9980MlDsa65Ed25519Sha512,
-        _extra: HashMap::new(),
-    }
-}
 
 fn alternate_public_projection(cert: &Cert) -> openpgp::Result<Vec<u8>> {
     cert.clone()
@@ -89,59 +43,6 @@ fn alternate_public_projection(cert: &Cert) -> openpgp::Result<Vec<u8>> {
         .0
         .strip_secret_key_material()
         .to_vec()
-}
-
-#[async_trait]
-impl Sign for CompositeSigner {
-    fn tuf_key(&self) -> Key {
-        openpgp_key(self.public_projection.clone())
-    }
-
-    async fn sign(
-        &self,
-        msg: &[u8],
-        _rng: &(dyn SecureRandom + Sync),
-    ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync + 'static>> {
-        self.signed_messages.lock().unwrap().push(msg.to_vec());
-
-        let policy = StandardPolicy::new();
-        let mut keypair = self
-            .cert
-            .keys()
-            .secret()
-            .with_policy(&policy, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_signing()
-            .next()
-            .ok_or_else(|| "fixture has no signing key".to_string())?
-            .key()
-            .clone()
-            .into_keypair()?;
-        let issuer = keypair.public().fingerprint();
-        let signature = SignatureBuilder::new(SignatureType::Binary)
-            .set_hash_algo(HashAlgorithm::SHA512)
-            .set_issuer_fingerprint(issuer)?
-            .sign_message(&mut keypair, msg)?;
-
-        Ok(Packet::from(signature).to_vec()?)
-    }
-}
-
-#[async_trait]
-impl KeySource for CompositeSigner {
-    async fn as_sign(&self) -> Result<Box<dyn Sign>, Box<dyn Error + Send + Sync + 'static>> {
-        Ok(Box::new(self.clone()))
-    }
-
-    async fn write(
-        &self,
-        _value: &str,
-        _key_id_hex: &str,
-    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
-        Err("the disposable in-memory key source is read-only".into())
-    }
 }
 
 fn role_keys(key_id: tough::schema::decoded::Decoded<tough::schema::decoded::Hex>) -> RoleKeys {
@@ -1283,6 +1184,124 @@ async fn all_top_level_roles_use_the_composite_profile() -> openpgp::Result<()> 
         expected_canonical.as_slice(),
         "each role must be signed over its canonical TUF bytes"
     );
+
+    Ok(())
+}
+
+const NATIVE_PACKAGE_BYTES: &[u8] =
+    include_bytes!("data/pacman-native/codiquary17-native-1.0-1-any.pkg.tar.zst");
+const NATIVE_PACKAGE_NAME: &str = "codiquary17-native-1.0-1-any.pkg.tar.zst";
+const NATIVE_PACKAGE_LENGTH: u64 = 124;
+const NATIVE_PACKAGE_SHA256: [u8; 32] = [
+    0xdc, 0x68, 0xe4, 0x8a, 0x55, 0x26, 0x8c, 0xd1, 0x08, 0x31, 0x48, 0x7a, 0xcf, 0xf7, 0xe3, 0x69,
+    0x36, 0x40, 0x1d, 0x04, 0x4c, 0x14, 0xcc, 0x2d, 0xec, 0x1e, 0xd9, 0x4b, 0x34, 0x67, 0xb3, 0x13,
+];
+
+#[tokio::test(flavor = "current_thread")]
+async fn publish_single_delegated_target_loads_frozen_pacman_package(
+) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    let package_sha256 = digest(&SHA256, NATIVE_PACKAGE_BYTES);
+    assert_eq!(NATIVE_PACKAGE_BYTES.len() as u64, NATIVE_PACKAGE_LENGTH);
+    assert_eq!(package_sha256.as_ref(), NATIVE_PACKAGE_SHA256);
+
+    let fixture =
+        publish_single_delegated_target(NATIVE_PACKAGE_NAME, NATIVE_PACKAGE_BYTES).await?;
+    assert_eq!(fixture.target_bytes, NATIVE_PACKAGE_BYTES);
+    assert_eq!(
+        fixture.consistent_snapshot_target_path,
+        format!(
+            "dc68e48a55268cd10831487acff7e36936401d044c14cc2dec1ed94b3467b313.{NATIVE_PACKAGE_NAME}"
+        )
+    );
+
+    let mut metadata_filenames = fixture
+        .metadata_by_filename
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    metadata_filenames.sort_unstable();
+    assert_eq!(
+        metadata_filenames,
+        [
+            "1.delegated.json",
+            "1.snapshot.json",
+            "1.targets.json",
+            "timestamp.json",
+        ]
+    );
+
+    let evidence_root = std::env::temp_dir().join(format!(
+        "tuf-rust-pq-publisher-roundtrip-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&evidence_root)?;
+    let metadata_dir = evidence_root.join("metadata");
+    let targets_dir = evidence_root.join("targets");
+    std::fs::create_dir(&metadata_dir)?;
+    std::fs::create_dir(&targets_dir)?;
+    for (filename, bytes) in &fixture.metadata_by_filename {
+        std::fs::write(metadata_dir.join(filename), bytes)?;
+    }
+    std::fs::write(
+        targets_dir.join(&fixture.consistent_snapshot_target_path),
+        &fixture.target_bytes,
+    )?;
+
+    let metadata = metadata_dir.canonicalize()?;
+    let targets = targets_dir.canonicalize()?;
+    let metadata_url = url::Url::from_directory_path(&metadata).map_err(|()| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "cannot convert metadata directory to URL: {}",
+                metadata.display()
+            ),
+        )
+    })?;
+    let targets_url = url::Url::from_directory_path(&targets).map_err(|()| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "cannot convert targets directory to URL: {}",
+                targets.display()
+            ),
+        )
+    })?;
+    let repository = RepositoryLoader::new(&fixture.public_root, metadata_url, targets_url)
+        .transport(FilesystemTransport)
+        .load()
+        .await?;
+
+    let mut published_targets = repository.all_targets();
+    let (published_name, published_target) = published_targets
+        .next()
+        .ok_or("published repository did not select the native package")?;
+    assert!(
+        published_targets.next().is_none(),
+        "published repository must claim exactly one target"
+    );
+    assert_eq!(published_name.raw(), NATIVE_PACKAGE_NAME);
+    assert_eq!(published_target.length, NATIVE_PACKAGE_LENGTH);
+    assert_eq!(
+        published_target.hashes.sha256.as_ref(),
+        NATIVE_PACKAGE_SHA256
+    );
+    assert_eq!(
+        published_target.custom.get("experimental-profile"),
+        Some(&serde_json::json!(true))
+    );
+
+    let selected_name = TargetName::new(NATIVE_PACKAGE_NAME)?;
+    let selected_bytes = repository
+        .read_target(&selected_name)
+        .await?
+        .ok_or("Tough did not return the selected native package")?
+        .into_vec()
+        .await?;
+    assert_eq!(selected_bytes.as_slice(), NATIVE_PACKAGE_BYTES);
 
     Ok(())
 }

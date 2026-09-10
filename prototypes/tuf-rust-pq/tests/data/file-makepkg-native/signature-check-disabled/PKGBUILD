@@ -1,0 +1,11 @@
+# Test-only configuration fault: the detached signature remains staged but is
+# not selected as a source, so makepkg performs only the artifact checksum.
+pkgname=codiquary-issue17-native-signature-fixture
+pkgver=1
+pkgrel=1
+arch=('any')
+source=('artifact.bin')
+sha256sums=(
+  'd13ecc865c37b23650615038c232eccfa5770c8bc345dbe98db595273fecda4a'
+)
+validpgpkeys=('AB1BEA3A37B7B55E01010FCF9FD95792A60A3222')

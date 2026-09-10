@@ -1,0 +1,146 @@
+{
+  "schema": "codiquary.synthetic-pacman-native-fixtures.v1",
+  "classification": "public synthetic nonproduction fixtures",
+  "purpose": "isolated native libalpm package and sync-database signature checks",
+  "determinism": {
+    "archive_bytes": "repeatable for identical member bytes, explicit metadata, and the recorded tar and zstd implementations",
+    "signer_and_signatures": "not deterministic; an ephemeral signer is generated for every fresh fixture directory"
+  },
+  "tools": [
+    {
+      "executable": "/usr/bin/tar",
+      "version_output": "tar (GNU tar) 1.35\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by John Gilmore and Jay Fenlason."
+    },
+    {
+      "executable": "/usr/bin/zstd",
+      "version_output": "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***"
+    }
+  ],
+  "signer": {
+    "primary_certificate_fingerprint": "3A013736081935591B079572B5BF6DA65146304C",
+    "signing_subkey_fingerprint": "5A6FC73F924A7C473C2B76AD5B9B92C920B04114",
+    "expected_native_signature_fingerprint": "3A013736081935591B079572B5BF6DA65146304C",
+    "algorithm": "OpenPGP RSA-2048 detached binary signature with SHA-256; interoperability fixture only",
+    "secret_key_serialized": false
+  },
+  "native_expectations": {
+    "signature_count": 1,
+    "status": "ALPM_SIGSTATUS_VALID",
+    "validity": "ALPM_SIGVALIDITY_FULL",
+    "trust_setup": "import signer.pub into the isolated GPG home and assign the primary certificate fingerprint ultimate ownertrust"
+  },
+  "public_certificate": {
+    "filename": "signer.pub",
+    "byte_length": 3162,
+    "sha256": "94935870e160c38323db1324cc0f02f9305059c6dd62a92380843862c0e7f4fc",
+    "sha512": "313ff506eafb0c956e80b2d977eb654bee0fc1cb3e78aa495c29fbb37a540f5666b5c64b0cb7cb46fa42672de551c856bb08d1edf76257c7f02817aa7e780dba"
+  },
+  "archives": [
+    {
+      "role": "package",
+      "variant": "original",
+      "filename": "codiquary17-native-1.0-1-any.pkg.tar.zst",
+      "tar_member_mtime_epoch": 946684800,
+      "member": {
+        "path": ".PKGINFO",
+        "content_utf8": "pkgname = codiquary17-native\npkgver = 1.0-1\n",
+        "byte_length": 44,
+        "sha256": "3d2d4a21cbed6a61cdd63b8ae74592c93d4c4f22d8be26314e400bb70edd3c54",
+        "sha512": "5e3665e99706e9d3f23d2e72e90b3c453203fc25316b6245a619c5f11a48e322ac029725889cc95f63ac142da0cc98921bbfcc8418b4169d4fbbc6bf8668a440"
+      },
+      "archive": {
+        "filename": "codiquary17-native-1.0-1-any.pkg.tar.zst",
+        "byte_length": 124,
+        "sha256": "dc68e48a55268cd10831487acff7e36936401d044c14cc2dec1ed94b3467b313",
+        "sha512": "b5db4f3165ae96c77782675df80cf2d73af10d80af731a5a4de8fbacc3c1e789fae92a9ff0e6131edee0da4d812e607ed327b594fdc185a89ff9a6ebf75f8e02"
+      },
+      "signature": {
+        "filename": "codiquary17-native-1.0-1-any.pkg.tar.zst.sig",
+        "byte_length": 382,
+        "sha256": "d0ff7b8135dc2adff16fef9ccd8cd7a472f328331314b24d89dc937d36e6a092",
+        "sha512": "0c52afef0567234375181a4410836d4a4c5b3cb41646f0bac1a3f31c07f5df543ad1acabca62f74895a98309fb29b0af27298e32e351bc31a893705341a1965b"
+      },
+      "stale_signature_filename": null,
+      "expected_signature_relationship": "the attached detached signature covers these exact archive bytes"
+    },
+    {
+      "role": "package",
+      "variant": "mtime-only-changed",
+      "filename": "codiquary17-native-1.0-1-any.pkg.mtime-changed.tar.zst",
+      "tar_member_mtime_epoch": 946684801,
+      "member": {
+        "path": ".PKGINFO",
+        "content_utf8": "pkgname = codiquary17-native\npkgver = 1.0-1\n",
+        "byte_length": 44,
+        "sha256": "3d2d4a21cbed6a61cdd63b8ae74592c93d4c4f22d8be26314e400bb70edd3c54",
+        "sha512": "5e3665e99706e9d3f23d2e72e90b3c453203fc25316b6245a619c5f11a48e322ac029725889cc95f63ac142da0cc98921bbfcc8418b4169d4fbbc6bf8668a440"
+      },
+      "archive": {
+        "filename": "codiquary17-native-1.0-1-any.pkg.mtime-changed.tar.zst",
+        "byte_length": 123,
+        "sha256": "4084b6af1224854f4565f17847cdfec35c0e616d848e1fbfee61b14de35fac36",
+        "sha512": "84bab598eda1907c8963910c341c83c74055fbcd98018d6b7637185be01b64cc9a532235b6df04c1c7ef8d8b3596f51bffeaaa9889aaf7d39aa74502da96daeb"
+      },
+      "signature": null,
+      "stale_signature_filename": "codiquary17-native-1.0-1-any.pkg.tar.zst.sig",
+      "expected_signature_relationship": "retain the original signature to exercise stale-signature rejection"
+    },
+    {
+      "role": "database",
+      "variant": "original",
+      "filename": "codiquary17.db",
+      "tar_member_mtime_epoch": 946684800,
+      "member": {
+        "path": "codiquary17-native-1.0-1/desc",
+        "content_utf8": "%NAME%\ncodiquary17-native\n\n%VERSION%\n1.0-1\n\n%FILENAME%\ncodiquary17-native-1.0-1-any.pkg.tar.zst\n\n",
+        "byte_length": 97,
+        "sha256": "cfea76c6ffe491bb9dd5c885b3115b1e6f3c7d028a23a8af4961fe8767519d12",
+        "sha512": "beee6531e324b55af2dc93e2560bbe4d61309136c1bec705211408cbf9745435715e59a63248f8e498e639cbade3c95ebec1ea8b06b8ac412a339980fc9bf7b3"
+      },
+      "archive": {
+        "filename": "codiquary17.db",
+        "byte_length": 151,
+        "sha256": "65a8552a8faf3d612369e955b3b08a99aa9e283512976bde9049f75babbc7de6",
+        "sha512": "5e3e128f2bb52ce3a0d63b481207794487b13af9aa244a446d20907d51cec6fa1457302e21d1af5312fe2a26531eeed2ad65074782ae9dd92efd50cacd127700"
+      },
+      "signature": {
+        "filename": "codiquary17.db.sig",
+        "byte_length": 382,
+        "sha256": "089b4995b67497460da1a146a0bf95f6239b6e6d0ce83086bf15dd4136d76e0d",
+        "sha512": "a4a73c5dd58323a5a57d1f7a657d1362caa87c8b1778b696226b60b9eb18728eabd08328774d9e792a3ee48a879c3c144ee385bd01d41f46407b7caa31bacae3"
+      },
+      "stale_signature_filename": null,
+      "expected_signature_relationship": "the attached detached signature covers these exact archive bytes"
+    },
+    {
+      "role": "database",
+      "variant": "mtime-only-changed",
+      "filename": "codiquary17.mtime-changed.db",
+      "tar_member_mtime_epoch": 946684801,
+      "member": {
+        "path": "codiquary17-native-1.0-1/desc",
+        "content_utf8": "%NAME%\ncodiquary17-native\n\n%VERSION%\n1.0-1\n\n%FILENAME%\ncodiquary17-native-1.0-1-any.pkg.tar.zst\n\n",
+        "byte_length": 97,
+        "sha256": "cfea76c6ffe491bb9dd5c885b3115b1e6f3c7d028a23a8af4961fe8767519d12",
+        "sha512": "beee6531e324b55af2dc93e2560bbe4d61309136c1bec705211408cbf9745435715e59a63248f8e498e639cbade3c95ebec1ea8b06b8ac412a339980fc9bf7b3"
+      },
+      "archive": {
+        "filename": "codiquary17.mtime-changed.db",
+        "byte_length": 151,
+        "sha256": "0621e9625401897ae381984651780a3d531a3e1c038ec9f4539ca332a7adaf50",
+        "sha512": "d3fb3d22b08741cd3596bf7bb6e874ee44d5cb86fbf2be661158eec4fa7ab1c3e7b7b62b30e4f6639c842cd8b01b32244ebd7084fe5a6faf6b08fd21ab45898f"
+      },
+      "signature": null,
+      "stale_signature_filename": "codiquary17.db.sig",
+      "expected_signature_relationship": "retain the original signature to exercise stale-signature rejection"
+    }
+  ],
+  "evidence_files": [
+    "scratch/package-source/.PKGINFO",
+    "scratch/database-source/codiquary17-native-1.0-1/desc",
+    "scratch/package-original.tar",
+    "scratch/package-mtime-changed.tar",
+    "scratch/database-original.tar",
+    "scratch/database-mtime-changed.tar"
+  ]
+}

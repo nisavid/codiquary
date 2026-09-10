@@ -1,0 +1,11 @@
+# Synthetic native-rejection preflight; the artifact and trust identity remain frozen.
+pkgname=codiquary-issue17-native-signature-fixture
+pkgver=1
+pkgrel=1
+arch=('any')
+source=('artifact.bin' 'artifact.bin.sig')
+sha256sums=(
+  'd13ecc865c37b23650615038c232eccfa5770c8bc345dbe98db595273fecda4a'
+  'bf43d8ccc9e1c18c4b161f1a8ece4a66a28b520525feedbc8bcd8a9850e3bfa2'
+)
+validpgpkeys=('AB1BEA3A37B7B55E01010FCF9FD95792A60A3222')
