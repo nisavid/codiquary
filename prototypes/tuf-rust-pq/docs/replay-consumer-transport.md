@@ -75,12 +75,15 @@ export CQ_RUN="$(mktemp -d "${TMPDIR:-/tmp}/cq-replay.XXXXXXXX")"
 mkdir -p "$CQ_RUN/target" "$CQ_RUN/tmp" "$CQ_RUN/home"
 
 test -d "$CQ_SOURCE/prototypes/tuf-rust-pq"
+mkdir -p "$CQ_SOURCE/prototypes/tuf-rust-pq/.scratch"
 test -d "$CQ_DEPS/tough/tough"
 test -d "$CQ_DEPS/sequoia/openpgp"
 test -x "$CQ_TOOLCHAIN/bin/cargo"
 test -d "$CQ_CARGO_CACHE"
 test -f "$CQ_CACHE_LOCK"
 ```
+
+The source `.scratch` directory is an empty destination mount point for the separately inspected dependencies. Create it outside the namespace; do not acquire dependencies, copy them into the source checkout, broaden the mounts, or add an unsandboxed fallback.
 
 `CQ_RUN` and its target, temporary, and home directories must be fresh and task-owned at the start of this frozen replay. The target may then be reused by the test, Clippy, and formatting commands below; it is not newly empty before each command.
 
