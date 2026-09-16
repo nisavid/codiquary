@@ -11,8 +11,8 @@ explicit about what their evidence proves.
 3. Update normative source before derived fixtures, reference output, or
    documentation.
 4. Use a Conventional Commit message.
-5. Certify the contribution under the Developer Certificate of Origin 1.1 by
-   signing off every commit:
+5. Certify each human-authored commit you create under the Developer Certificate
+   of Origin 1.1 by signing it off:
 
    ```sh
    git commit --signoff
@@ -20,6 +20,11 @@ explicit about what their evidence proves.
 
    The sign-off records that you have the right to submit the contribution
    under this project's license. It is not a cryptographic release signature.
+   This is contribution guidance. The selected hosted DCO app's ordinary gate
+   also exempts merge commits and commits whose GitHub-associated author is a
+   Bot; the Bot exemption does not identify or authenticate the pusher. See
+   [DCO repository control](docs/repository-controls/dco.md) for the enforced
+   matching rules, evidence boundary, and rollout state.
 6. Run `./scripts/check-repository.sh`, `git diff --check`, and every focused
    test or conformance suite for the changed surface.
 

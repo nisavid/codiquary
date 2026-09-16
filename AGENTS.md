@@ -52,7 +52,8 @@ Use the canonical `needs-triage`, `needs-info`, `ready-for-agent`,
 This is a personal `nisavid` project. Use `Ivan D Vasin <ivan@nisavid.io>` for
 Git work and the `nisavid` GitHub account for repository mutations. Prefix
 branches with `ivan/`. Use Conventional Commits for commits and pull-request
-titles. Sign off every commit under the DCO with `git commit --signoff`.
+titles. Sign off every human-authored commit you create with
+`git commit --signoff`.
 
 Before committing or publishing, run:
 
@@ -62,8 +63,14 @@ git diff --check
 ```
 
 Run every additional test or conformance suite that owns the changed surface.
-Report what the checks actually prove; a green repository-policy workflow does
-not prove release safety or production authority.
+Signing off every human-authored commit is contributor guidance. The selected
+hosted DCO app's ordinary pull-request gate separately exempts merge commits and
+commits whose GitHub-associated author has type `Bot`; the Bot exemption is not
+Dependabot-only and does not authenticate the pusher. Follow
+[`docs/repository-controls/dco.md`](docs/repository-controls/dco.md) for the
+enforced matching rules and repository-control boundary. Report what the checks
+actually prove; a green repository-policy or DCO check does not prove release
+safety or production authority.
 
 ## Change policy
 
