@@ -38,8 +38,8 @@ The contract requires:
   once;
 - injectable in-memory transport and an explicit test clock, neither exposed
   as a production weakening;
-- fail-closed handling of missing, malformed, duplicated, mismatched, or
-  unknown required security data.
+- fail-closed handling of missing, malformed, mismatched, or unknown required
+  security data, including duplicate JSON members in the signed binding.
 
 The evidence classes are deliberately separate:
 
@@ -66,7 +66,7 @@ archive, example, prototype, candidate, build, or dependency resolver was run.
 | --- | --- | --- | --- | --- |
 | [Tough 0.24.0](https://crates.io/crates/tough/0.24.0) | Published 2026-07-10; checksum-verified package; `MIT OR Apache-2.0` | `.cargo_vcs_info.json` maps the package to [`98d8eb8b2ce63515d9b4981c938ef6453c5b5771`](https://github.com/awslabs/tough/tree/98d8eb8b2ce63515d9b4981c938ef6453c5b5771) | The retrieved, non-archived development repository was at that same commit | Maintained and the best-evidenced adaptation path; not conforming unmodified |
 | [`tuf` 0.3.0-beta14](https://crates.io/crates/tuf/0.3.0-beta14) | Published 2025-10-20; checksum-verified package; Rust 1.80; `MIT/Apache-2.0` | `.cargo_vcs_info.json` maps the package to [`8e60df7e6adc95cffe4b4bc9a913b924dc82d860`](https://github.com/theupdateframework/rust-tuf/tree/8e60df7e6adc95cffe4b4bc9a913b924dc82d860) | The retrieved, non-archived repository was at [`219ca7d05818d5dd44ec4e32ab47c5ce64a7bf44`](https://github.com/theupdateframework/rust-tuf/tree/219ca7d05818d5dd44ec4e32ab47c5ce64a7bf44), an unreleased 0.3.0-beta15 line requiring Rust 1.88 | Current prerelease line, explicitly API-unstable, and not conforming unmodified |
-| [`tuf` 0.2.0](https://crates.io/crates/tuf/0.2.0) | Published 2017-07-06 and last updated 2017-11-30; checksum-verified package | No `.cargo_vcs_info.json`; a release-to-commit mapping is not established | Its age alone says nothing about beta14, but this stable package lacks the required target-custom and crypto surfaces | Disqualified |
+| [`tuf` 0.2.0](https://crates.io/crates/tuf/0.2.0) | Published 2017-07-06 and last updated 2017-11-30; checksum-verified package | No `.cargo_vcs_info.json`; a release-to-commit mapping is not established | Its age alone says nothing about beta14, but this stable package lacks target custom data and the required algorithm-30 profile | Disqualified |
 | [Sequoia OpenPGP 2.4.1](https://crates.io/crates/sequoia-openpgp/2.4.1) | Published 2026-07-09; checksum-verified package; Rust 1.85; `LGPL-2.0-or-later` | `.cargo_vcs_info.json` maps the package to [`0b0c8c7f038b829de2da0d28a822941d8600f3ee`](https://gitlab.com/sequoia-pgp/sequoia/-/tree/0b0c8c7f038b829de2da0d28a822941d8600f3ee) | A newer development revision was retrieved, but its archive state was unknown and its features are not attributed to 2.4.1 | Maintained crypto companion, not a TUF implementation |
 
 Registry and repository metadata were retrieved at
@@ -81,20 +81,21 @@ treated as unknown.
 means a narrow Codiquary-owned check can enforce the accepted contract without
 changing the dependency. `Source change` means the dependency itself must be
 patched, forked, or changed upstream. `Absent` means the published candidate
-cannot meet the requirement on the available evidence. Matrix entries do not
-constitute runtime qualification.
+cannot meet the requirement on the available evidence. `Not established`
+means the inspected evidence cannot show that the candidate enforces the
+requirement. Matrix entries do not constitute runtime qualification.
 
 | Accepted requirement | Tough 0.24.0 | `tuf` 0.3.0-beta14 | `tuf` 0.2.0 |
 | --- | --- | --- | --- |
 | Authenticate root, timestamp, snapshot, and targets; exclude delegations | Wrapper | Wrapper | Direct for its older four-role model |
 | RFC 9980 algorithm 30 and accepted SHA-512 profile | Source change, with retained prototype evidence | Source change, no prototype evidence | Absent |
 | TUF key IDs, distinct v6 issuer fingerprint, and thresholds | Source change for the new key form; native threshold machinery remains | Source change for the new key form; native threshold machinery remains | Source change; native threshold machinery alone is insufficient |
-| Closed, versioned six-field target binding | Wrapper over opaque target `custom` | Wrapper over opaque target `custom` | Absent |
+| Closed, versioned six-field target binding; reject missing, malformed, mismatched, and unknown required fields | Wrapper over opaque target `custom` after map deserialization | Wrapper over opaque target `custom` after map deserialization | Absent |
+| Reject duplicate JSON members in the signed binding | Not established; needs a pre-map source-boundary proof or change | Not established; needs a pre-map source-boundary proof or change | Absent |
 | Exactly one matching top-level target before target acquisition | Wrapper | Wrapper | Absent |
 | Verify exact length and digest, then hold one byte object without reacquisition | Wrapper | Wrapper | Not established |
 | Injectable custom or in-memory transport | Direct | Direct | Direct repository abstraction and ephemeral repository |
 | Explicit test clock with no production override | Source change | Wrapper around a public time-taking API | Absent |
-| Fail closed for unknown required security data | Wrapper for the accepted binding and extension namespace | Wrapper for the accepted binding and extension namespace | Absent |
 
 ### Tough 0.24.0
 
@@ -110,9 +111,19 @@ and require exactly one six-field match before calling `read_target`. This is a
 wrapper responsibility; Tough itself permits delegations and additional
 metadata fields.
 
+That wrapper sees `custom` only after Tough has deserialized it into a
+`HashMap<String, Value>`. The inspected source does not establish rejection of
+duplicate JSON member names before that map is constructed, and a
+post-deserialization wrapper cannot observe members the map representation no
+longer distinguishes. It can still reject missing, malformed, mismatched, and
+unknown binding fields and count distinct eligible target entries. Duplicate
+binding members therefore remain a separate, not-established capability.
+
 Tough's native verifier canonicalizes the signed role, authorizes signatures
 by TUF key ID, deduplicates signatures, and enforces role thresholds
 ([verification](https://github.com/awslabs/tough/blob/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/src/schema/verify.rs#L8-L58)).
+That duplicate-signature behavior is independent of duplicate members inside
+the signed target binding and does not close the map-deserialization gap.
 Its closed key enum and verifier support RSA, Ed25519, and ECDSA only. A TUF key
 ID is the SHA-256 digest of the canonical key object
 ([key model](https://github.com/awslabs/tough/blob/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/src/schema/key.rs#L35-L81),
@@ -168,8 +179,18 @@ public repository-provider trait, and verified target readers
 [target schema](https://github.com/theupdateframework/rust-tuf/blob/8e60df7e6adc95cffe4b4bc9a913b924dc82d860/tuf/src/metadata.rs#L1640-L1744),
 [targets and delegations](https://github.com/theupdateframework/rust-tuf/blob/8e60df7e6adc95cffe4b4bc9a913b924dc82d860/tuf/src/metadata.rs#L1867-L1914),
 [repository interface](https://github.com/theupdateframework/rust-tuf/blob/8e60df7e6adc95cffe4b4bc9a913b924dc82d860/tuf/src/repository.rs#L41-L74)).
-The same closed-binding, top-level-only, exactly-one, and held-buffer rules can
-be enforced by a wrapper.
+The same map-visible binding checks, top-level-only selection, exactly-one
+rule, and held-buffer rules can be enforced by a wrapper.
+
+Beta14 likewise deserializes target `custom` into a `BTreeMap` without using a
+duplicate-rejecting map adapter
+([POUF1 shim](https://github.com/theupdateframework/rust-tuf/blob/8e60df7e6adc95cffe4b4bc9a913b924dc82d860/tuf/src/pouf/pouf1/shims.rs#L510-L516)).
+The post-deserialization wrapper can enforce the binding shape it receives,
+but the inspected API cannot establish that duplicate JSON members were
+rejected before map construction. Beta14 separately deduplicates signature key
+IDs while enforcing authorized-key thresholds
+([signature verification](https://github.com/theupdateframework/rust-tuf/blob/8e60df7e6adc95cffe4b4bc9a913b924dc82d860/tuf/src/verify.rs#L85-L166));
+that is not duplicate-binding-member evidence.
 
 Its crypto model is nevertheless closed around Ed25519. Signature scheme and
 key type have unknown sentinels, but verification accepts only Ed25519
@@ -206,8 +227,10 @@ published beta14 package and must not be silently treated as beta14 behavior.
 The checksum-verified stable archive predates the current prerelease design.
 Its target description contains only length and hashes, with no custom field
 ([package source](https://docs.rs/crate/tuf/0.2.0/source/src/metadata.rs#L825-L951));
-its crypto model is Ed25519-only
-([package source](https://docs.rs/crate/tuf/0.2.0/source/src/crypto.rs#L134-L179));
+its crypto model supports Ed25519, RSA-PSS/SHA-256, and RSA-PSS/SHA-512, but
+not algorithm 30
+([schemes](https://docs.rs/crate/tuf/0.2.0/source/src/crypto.rs#L134-L179),
+[verification](https://docs.rs/crate/tuf/0.2.0/source/src/crypto.rs#L525-L531));
 and metadata expiry calls the wall clock directly
 ([package source](https://docs.rs/crate/tuf/0.2.0/source/src/tuf.rs#L135-L143)).
 It does expose a repository trait and an ephemeral repository
@@ -277,20 +300,25 @@ verification boundary. `tuf` beta14 offers the better clock seam and similar
 transport and target primitives, but its unproven algorithm change is broader,
 its public time-taking API needs confinement, and its prerelease API can move.
 Both paths still need the same contract wrapper for exact target selection,
-closed custom data, exact length, private buffering, and one held object.
+map-visible closed custom data, exact length, private buffering, and one held
+object. Neither post-deserialization wrapper is sufficient evidence for
+duplicate JSON binding-member rejection; that enforcement boundary remains
+unresolved.
 
 The ownership boundary is consequential. Codiquary's security maintainer owns
-the closed-binding parser, selection order, exact-length check, buffering, and
-production/test-clock API boundary. The selected TUF project's maintainer owns
-an accepted upstream crypto or clock change; Codiquary owns the same code and
-its security response if it carries a fork instead. The leaf application and
-release maintainer own Sequoia backend selection, native-library availability,
-and the locked build. The distribution maintainer owns license compliance, and
-the compatibility maintainer owns Linux and GitHub-hosted macOS qualification.
-No inspected path requires an unsafe boundary or a duplicate TUF metadata
-parser. The proposed wrapper parses only authenticated target `custom` data;
-introducing either unsafe code or a second TUF parser would be a new design
-decision outside this evidence.
+the post-deserialization binding validator, selection order, exact-length
+check, buffering, and production/test-clock API boundary. The selected TUF
+project's maintainer owns an accepted upstream crypto or clock change;
+Codiquary owns the same code and its security response if it carries a fork
+instead. Ownership of duplicate-member enforcement cannot be assigned until
+the pre-map source boundary is chosen. The leaf application and release
+maintainer own Sequoia backend selection, native-library availability, and the
+locked build. The distribution maintainer owns license compliance, and the
+compatibility maintainer owns Linux and GitHub-hosted macOS qualification.
+No inspected path establishes a need for unsafe code, and this report selects
+neither a parallel TUF parser nor a dependency source change for duplicate
+members. Either would be a new security and maintenance boundary requiring
+review.
 
 Toolchain and dependency consequences are not yet resolver-qualified. Tough
 0.24.0 declares Rust 2018 but no minimum Rust version in its published
@@ -317,6 +345,9 @@ The following evidence is still missing:
 - proof that every zero-target, multi-target, six-field mismatch, delegation,
   malformed or unknown required-field case fails before the transport receives
   a target request;
+- proof that signed bindings with duplicate JSON member names, using both equal
+  and conflicting values, are rejected before map construction can make the
+  duplicate unobservable and before the transport receives a target request;
 - proof that digest and exact length complete before byte publication, the
   helper sees the same held allocation and bytes once, and no second target
   acquisition occurs;
@@ -324,6 +355,13 @@ The following evidence is still missing:
   the production entry point; and
 - upstream maintenance intent for either source change. Repository activity
   alone does not establish willingness to accept or sustain this profile.
+
+The smallest duplicate-member source-boundary question is: “Does the candidate
+reject duplicate member names while parsing signed target `custom` data,
+before constructing its `HashMap` or `BTreeMap`; if not, at what authenticated
+parse boundary can rejection be enforced, and does that require a dependency
+source change or a separately reviewed parser boundary?” The current map-based
+APIs do not answer that question.
 
 If upstream intent is needed before the decision, the minimal public questions
 are: “Would Tough accept an extensible verifier/key representation for RFC 9980
@@ -342,17 +380,21 @@ updater or release system. The proof is complete only when the same revision:
 1. verifies all four canonical roles with algorithm 30, SHA-512, ordinary TUF
    key IDs, distinct v6 issuer fingerprints, both composite components, and
    thresholds, including duplicate and unauthorized signature failures;
-2. rejects delegations and enforces the closed, versioned six-field binding;
-3. rejects zero, multiple, malformed, unknown-required, and every single-field
-   mismatch before any target fetch;
-4. uses a counting in-memory transport to prove one acquisition, including a
+2. rejects delegations and enforces missing, malformed, mismatched, and unknown
+   fields in the closed, versioned six-field binding;
+3. rejects signed bindings containing duplicate JSON member names, with equal
+   and conflicting values, at a proven pre-map boundary before any target
+   fetch;
+4. rejects zero and multiple matching targets and every single-field mismatch
+   before any target fetch;
+5. uses a counting in-memory transport to prove one acquisition, including a
    hostile one-byte-equivocation case;
-5. consumes target bytes privately through EOF, checks signed digest and exact
+6. consumes target bytes privately through EOF, checks signed digest and exact
    length, creates one held byte object, and proves the helper observes that
    object once without reacquisition;
-6. uses a fixed time in tests while the production entry point has no
+7. uses a fixed time in tests while the production entry point has no
    caller-controlled clock; and
-7. passes the candidate's relevant upstream tests and the new conformance cases
+8. passes the candidate's relevant upstream tests and the new conformance cases
    on Linux and GitHub-hosted macOS with the exact toolchain, lockfile, crypto
    backend, and native-library versions recorded.
 
