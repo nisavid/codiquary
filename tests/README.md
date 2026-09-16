@@ -6,7 +6,7 @@ substrate while preserving clear ownership by contract, core, adapter,
 conformance, and qualification surface.
 
 A test describes only the behavior and externally oriented contract it proves.
-The library test asserts that every fixture has a unique identifier and an
-explicit result. The executable is checked through the same public corpus, so
-documentation and review logs can consume deterministic output without
-duplicating fixtures.
+The current library test checks that every predefined case has a nonempty
+identifier and description and that identifiers are unique. It does not run the
+`cophax` executable, evaluate a case, or establish conformance, qualification,
+or production evidence.

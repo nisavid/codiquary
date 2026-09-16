@@ -1,6 +1,7 @@
-//! Small, deterministic conformance corpus used by executable documentation.
+//! Predefined expected-case inventory printed by the current scaffold command.
+//! It does not execute conformance or produce observed results.
 
-/// Machine-readable result for a disposable conformance case.
+/// Expected-result label for a descriptive case.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResultKind {
     Accepted,
@@ -18,8 +19,8 @@ impl ResultKind {
     }
 }
 
-/// A public, value-free fixture. Inputs are descriptive labels until the wire
-/// contracts are frozen by their owning design tickets.
+/// A public, value-free expected case. Its fields are descriptive labels, not
+/// executable inputs or observed results.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Case {
     pub id: &'static str,
@@ -50,6 +51,7 @@ pub const CASES: &[Case] = &[
     },
 ];
 
+/// Returns the predefined expected-case inventory.
 pub fn cases() -> &'static [Case] {
     CASES
 }
@@ -59,7 +61,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn corpus_is_unique_and_explicit() {
+    fn case_fields_are_nonempty_and_identifiers_are_unique() {
         for (index, case) in CASES.iter().enumerate() {
             assert!(!case.id.is_empty());
             assert!(!case.description.is_empty());
