@@ -1,0 +1,9 @@
+diff --git a/tough/Cargo.toml b/tough/Cargo.toml
+--- a/tough/Cargo.toml
++++ b/tough/Cargo.toml
+@@ -57 +57,4 @@
+-http2 = ["http", "reqwest/http2"]
++http2 = ["http", "reqwest/http2"]
++
++# Proof-only feature; the implementation is added after the first observed red test.
++test-clock = []

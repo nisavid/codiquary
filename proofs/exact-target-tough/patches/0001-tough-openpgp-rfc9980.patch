@@ -1,0 +1,18 @@
+diff --git a/tough/Cargo.toml b/tough/Cargo.toml
+--- a/tough/Cargo.toml
++++ b/tough/Cargo.toml
+@@ -21,12 +21,14 @@ jiff = { version = "0.2", features = ["serde"] }
+ jiff = { version = "0.2", features = ["serde"] }
+ log = "0.4"
+ olpc-cjson = { version = "0.1", path = "../olpc-cjson" }
++openssl-sys = { version = "0.9", features = ["vendored"] }
+ pem = "3"
+ percent-encoding = "2"
+ reqwest = { version = "0.13", optional = true, default-features = false, features = ["stream", "rustls-no-provider"] }
+ rustls = "0.23"
+ rustls-native-certs = { version = "0.8", optional = true }
+ rustls-platform-verifier = { version = "0.7", optional = true }
++sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ serde_plain = "1"

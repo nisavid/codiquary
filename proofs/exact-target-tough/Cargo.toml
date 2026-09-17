@@ -1,0 +1,35 @@
+[package]
+name = "codiquary-exact-target-tough-proof"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+[lib]
+name = "codiquary_exact_target_tough_proof"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+jiff = "0.2"
+openssl = "0.10"
+openssl-sys = { version = "0.9", features = ["vendored"] }
+sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
+tough = { version = "=0.24.0", path = ".work/tough/tough", features = ["test-clock"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = "warn"

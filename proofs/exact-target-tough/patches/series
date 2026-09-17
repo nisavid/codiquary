@@ -1,0 +1,6 @@
+# The dependency checkpoint applies the declaration-only prefixes of 0001 and
+# 0002. Their behavior changes follow the first observed red test. 0003 follows
+# the observed raw-to-map duplicate characterization.
+0001-tough-openpgp-rfc9980.patch
+0002-tough-test-clock.patch
+0003-tough-reject-duplicate-target-custom-members.patch

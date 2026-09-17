@@ -1,0 +1,111 @@
+FROM docker.io/library/rust@sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d
+
+LABEL org.opencontainers.image.base.digest="sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d" \
+      org.opencontainers.image.base.name="docker.io/library/rust" \
+      io.nisavid.codiquary.executor.inputs-sha256="2fc6b72bc8cbf5f6f71e61b473615436a2c248a6a1a0be685d7bae9635346971" \
+      io.nisavid.codiquary.executor.platform="linux/amd64" \
+      io.nisavid.codiquary.executor.rust="1.98.1" \
+      io.nisavid.codiquary.executor.snapshot="debian/20260825T000000Z"
+
+SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+
+COPY inputs.sha256 /tmp/codiquary-executor/inputs.sha256
+COPY inputs/ /tmp/codiquary-executor/inputs/
+
+RUN cd /tmp/codiquary-executor && \
+    awk '{print $2}' inputs.sha256 | LC_ALL=C sort > expected-inputs.txt && \
+    find inputs -type f -printf '%P\n' | LC_ALL=C sort > actual-inputs.txt && \
+    cmp expected-inputs.txt actual-inputs.txt && \
+    cd inputs && \
+    sha256sum --check ../inputs.sha256 && \
+    sha256sum --check apt-lists.sha256 && \
+    (cd debs && sha256sum --check ../debs.sha256) && \
+    (cd rust-dist && sha256sum --check inputs.sha256) && \
+    expected_channel=$(awk '{print $1}' rust-dist/channel-rust-1.98.1.toml.sha256) && \
+    actual_channel=$(sha256sum rust-dist/channel-rust-1.98.1.toml | awk '{print $1}') && \
+    test "$actual_channel" = "$expected_channel" && \
+    python3 -I -c 'import json, pathlib; p = pathlib.Path("base"); m = json.loads((p / "manifest.json").read_text()); c = json.loads((p / "config.json").read_text()); i = json.loads((p / "image-inspect.json").read_text()); exec("""if m["config"]["digest"] != "sha256:ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26":\n    raise SystemExit("base manifest config digest mismatch")\nif c["architecture"] != "amd64":\n    raise SystemExit("base config architecture mismatch")\nif c["os"] != "linux":\n    raise SystemExit("base config OS mismatch")\nif "RUST_VERSION=1.98.1" not in c["config"]["Env"]:\n    raise SystemExit("base config Rust version mismatch")\nif len(i) != 1:\n    raise SystemExit("expected one base image inspection")\nif i[0]["Digest"] != "sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d":\n    raise SystemExit("base image digest mismatch")\nif i[0]["Id"].removeprefix("sha256:") != "ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26":\n    raise SystemExit("base image ID mismatch")\nif i[0]["Architecture"] != "amd64":\n    raise SystemExit("base image architecture mismatch")\nif i[0]["Os"] != "linux":\n    raise SystemExit("base image OS mismatch")""")' && \
+    python3 -I -c 'import json, pathlib; x = json.loads(pathlib.Path("rust-dist/components.json").read_text()); expected = {("clippy-preview", "clippy-1.98.1-x86_64-unknown-linux-gnu.tar.xz", "e167f333be24e1d5eea56ea563c7def0aa0bd613f5ce3445976c93b0288799d1"), ("rustfmt-preview", "rustfmt-1.98.1-x86_64-unknown-linux-gnu.tar.xz", "b29a1addcbf2aa8f5785075605700e63cbe131b08c8334b50c09cfca8bbc51dc")}; exec("""if {(e["package"], e["file"], e["sha256"]) for e in x} != expected:\n    raise SystemExit("Rust component set mismatch")\nif not all(e["target"] == "x86_64-unknown-linux-gnu" for e in x):\n    raise SystemExit("Rust component target mismatch")""")' && \
+    count=0 && \
+    while IFS=$'\t' read -r archive package version architecture; do \
+      test -n "$archive" && test -n "$package" && test -n "$version" && test -n "$architecture"; \
+      test "$(dpkg-deb --field "debs/$archive" Package)" = "$package"; \
+      test "$(dpkg-deb --field "debs/$archive" Version)" = "$version"; \
+      test "$(dpkg-deb --field "debs/$archive" Architecture)" = "$architecture"; \
+      count=$((count + 1)); \
+    done < deb-packages.tsv && \
+    test "$count" -eq 19
+
+RUN cd /tmp/codiquary-executor/inputs && \
+    mapfile -t archives < <(awk -F '\t' '{print "/tmp/codiquary-executor/inputs/debs/" $1}' deb-packages.tsv) && \
+    test "${#archives[@]}" -eq 19 && \
+    apt-get \
+      -o Dir::Etc::sourcelist=/dev/null \
+      -o Dir::Etc::sourceparts=- \
+      --assume-yes \
+      --no-download \
+      --no-install-recommends \
+      install "${archives[@]}" && \
+    while IFS=$'\t' read -r archive package version architecture; do \
+      test "$(dpkg-query -W -f='${Version}' "$package")" = "$version"; \
+      test "$(dpkg-query -W -f='${Architecture}' "$package")" = "$architecture"; \
+    done < deb-packages.tsv
+
+RUN cd /tmp/codiquary-executor/inputs/rust-dist && \
+    for component in \
+      clippy-1.98.1-x86_64-unknown-linux-gnu \
+      rustfmt-1.98.1-x86_64-unknown-linux-gnu; do \
+      tar --extract --xz --file "$component.tar.xz"; \
+      "./$component/install.sh" \
+        --prefix=/usr/local/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu \
+        --disable-ldconfig; \
+      rm -rf "$component"; \
+    done && \
+    rustup component list --installed | grep -Fx clippy-x86_64-unknown-linux-gnu && \
+    rustup component list --installed | grep -Fx rustfmt-x86_64-unknown-linux-gnu && \
+    toolchain_bin=/usr/local/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin && \
+    for tool in cargo rustc rustdoc rustfmt cargo-fmt clippy-driver cargo-clippy; do \
+      test -f "$toolchain_bin/$tool"; \
+      test -x "$toolchain_bin/$tool"; \
+    done && \
+    test "$("$toolchain_bin/rustc" --version | awk '{print $2}')" = 1.98.1 && \
+    "$toolchain_bin/cargo" --version | grep -E '^cargo 1\.98\.1 \(' && \
+    "$toolchain_bin/rustdoc" --version | grep -E '^rustdoc 1\.98\.1 \(' && \
+    "$toolchain_bin/rustfmt" --version | grep -E '^rustfmt 1\.9\.0-' && \
+    "$toolchain_bin/cargo-fmt" --version | grep -E '^rustfmt 1\.9\.0-' && \
+    "$toolchain_bin/clippy-driver" --version | grep -E '^clippy 0\.1\.98 ' && \
+    "$toolchain_bin/cargo-clippy" --version | grep -E '^clippy 0\.1\.98 '
+
+RUN mkdir -p /opt/codiquary/executor && \
+    { \
+      printf '%s\n' CODIQUARY_BUILD_NETWORK_PREFLIGHT_V1; \
+      ip -o link show; \
+      test -z "$(ip -o -4 route show)"; \
+      test -z "$(ip -o -6 route show)"; \
+      python3 -c 'exec("import errno\nimport socket\nprobes = ((socket.AF_INET, (\"192.0.2.1\", 9), \"ipv4\"), (socket.AF_INET6, (\"2001:db8::1\", 9, 0, 0), \"ipv6\"))\nfor family, address, label in probes:\n    sock = socket.socket(family, socket.SOCK_STREAM)\n    sock.settimeout(1)\n    try:\n        sock.connect(address)\n    except OSError as error:\n        if error.errno != errno.ENETUNREACH:\n            raise SystemExit(f\"{label} denial was not ENETUNREACH: {error!r}\")\n        print(f\"{label}_test_net=ENETUNREACH\")\n    else:\n        raise SystemExit(f\"{label} TEST-NET connection unexpectedly succeeded\")\n    finally:\n        sock.close()")'; \
+      printf '%s\n' CODIQUARY_BUILD_NETWORK_PREFLIGHT_COMPLETE; \
+    } | tee /opt/codiquary/executor/build-network-denial.txt
+
+RUN mkdir -p /opt/codiquary/executor /opt/codiquary/lib && \
+    test -f /usr/lib/x86_64-linux-gnu/libclang-14.so.14.0.6 && \
+    ln -s /usr/lib/x86_64-linux-gnu/libclang-14.so.14.0.6 \
+      /opt/codiquary/lib/libclang.so && \
+    test "$(readlink -f /opt/codiquary/lib/libclang.so)" = \
+      /usr/lib/x86_64-linux-gnu/libclang-14.so.14.0.6 && \
+    cp /tmp/codiquary-executor/inputs.sha256 \
+      /opt/codiquary/executor/inputs.sha256 && \
+    cp /tmp/codiquary-executor/inputs/deb-packages.tsv \
+      /opt/codiquary/executor/added-debian-packages.tsv && \
+    cp /tmp/codiquary-executor/inputs/rust-dist/components.json \
+      /opt/codiquary/executor/added-rust-components.json && \
+    LC_ALL=C dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' | \
+      LC_ALL=C sort > /opt/codiquary/executor/packages.tsv && \
+    rustup component list --installed | LC_ALL=C sort \
+      > /opt/codiquary/executor/rust-components.txt && \
+    printf '%s\n' /usr/lib/x86_64-linux-gnu/libclang-14.so.14.0.6 \
+      > /opt/codiquary/executor/libclang-target.txt && \
+    rm -rf /tmp/codiquary-executor /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+WORKDIR /repo
+
+CMD ["/bin/bash"]

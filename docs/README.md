@@ -14,3 +14,7 @@ that behavior; it does not redefine it. Executable examples should come from
 - `provenance/` records the reviewed source decisions and ownership handoff.
 - `repository-controls/` documents contribution and repository-admission
   controls without granting release or deployment authority.
+
+The experimental Tough exact-target proof has one repo-carried procedure:
+[`agents/replay-exact-target-tough-proof.md`](agents/replay-exact-target-tough-proof.md).
+It is not a production or release procedure.
