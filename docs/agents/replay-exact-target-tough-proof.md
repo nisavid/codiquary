@@ -601,6 +601,456 @@ cq_oci_controller() {
 }
 ```
 
+### Restore the public Linux executor inputs
+
+Run this acquisition in the same Bash shell after defining the controller
+above. Set `CQ_RESTORATION_ROOT` to a new task-owned directory in durable task
+storage. The command creates every child path; an existing root stops it.
+
+Only `CQ_ACQ` is mounted into the acquisition container. The proof
+checkout, public source archives, Cargo homes, controller state, controller
+receipts, and host home remain outside that mount. The controller prepares its
+closed configuration before the first OCI action and retains the same state for
+the later base export.
+
+```sh
+set -euo pipefail
+
+CQ_REPO=$(git rev-parse --show-toplevel)
+CQ_PROOF="$CQ_REPO/proofs/exact-target-tough"
+CQ_RESTORATION_ROOT=${CQ_RESTORATION_ROOT:?set a new task-owned restoration root}
+CQ_INPUTS="$CQ_RESTORATION_ROOT/public-sources"
+CQ_PUBLIC="$CQ_RESTORATION_ROOT/executor-documentation"
+CQ_ACQ="$CQ_RESTORATION_ROOT/executor-inputs"
+CQ_ACQ_STATE="$CQ_RESTORATION_ROOT/podman-acquisition-state"
+CQ_ACQ_EVIDENCE="$CQ_RESTORATION_ROOT/acquisition-evidence"
+CQ_ACQ_CONTROLLER="$CQ_ACQ_EVIDENCE/host-only-controller"
+CQ_ACQ_LOGS="$CQ_ACQ_EVIDENCE/logs"
+CQ_BASE=docker.io/library/rust@sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d
+
+[[ "$CQ_RESTORATION_ROOT" = /* && "$CQ_RESTORATION_ROOT" != *,* && \
+  "$CQ_RESTORATION_ROOT" != *$'\n'* ]]
+CQ_RESTORATION_PARENT=$(dirname "$CQ_RESTORATION_ROOT")
+test -d "$CQ_RESTORATION_PARENT" && test ! -L "$CQ_RESTORATION_PARENT"
+test "$(cd "$CQ_RESTORATION_PARENT" && pwd -P)" = \
+  "$CQ_RESTORATION_PARENT"
+test ! -e "$CQ_RESTORATION_ROOT"
+mkdir -p \
+  "$CQ_INPUTS/github-awslabs-tough" \
+  "$CQ_INPUTS/crate-sequoia-openpgp" \
+  "$CQ_PUBLIC/rust-image-metadata/bookworm" \
+  "$CQ_ACQ" \
+  "$CQ_ACQ_CONTROLLER" \
+  "$CQ_ACQ_LOGS"
+chmod 700 "$CQ_RESTORATION_ROOT" "$CQ_INPUTS" "$CQ_PUBLIC" \
+  "$CQ_ACQ" "$CQ_ACQ_EVIDENCE" "$CQ_ACQ_CONTROLLER" \
+  "$CQ_ACQ_LOGS"
+cq_prepare_podman_state "$CQ_ACQ_STATE"
+
+cq_download_public() {
+  test "$#" -eq 3 || return 1
+  local url=$1
+  local destination=$2
+  local expected=$3
+  local temporary="$destination.partial"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+  test ! -e "$destination" && test ! -e "$temporary" || return 1
+  /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/curl --disable \
+    --fail --location --proto '=https' --tlsv1.2 \
+    --output "$temporary" "$url"
+  printf '%s  %s\n' "$expected" "$temporary" | /usr/bin/sha256sum -c -
+  /usr/bin/mv --no-target-directory "$temporary" "$destination"
+}
+
+cq_download_public \
+  https://codeload.github.com/awslabs/tough/tar.gz/98d8eb8b2ce63515d9b4981c938ef6453c5b5771 \
+  "$CQ_INPUTS/github-awslabs-tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771.tar.gz" \
+  a9d4bc2847cd7cee888d6fa7bf9301f787b032a9f2a8074392c1ef7f511acd86
+cq_download_public \
+  https://crates.io/api/v1/crates/sequoia-openpgp/2.4.1/download \
+  "$CQ_INPUTS/crate-sequoia-openpgp/sequoia-openpgp-2.4.1.crate" \
+  0fbc8f9818a6fad141d85993777ba298ee52c80a09bd23d45dda461a6b7c83cb
+cq_download_public \
+  https://raw.githubusercontent.com/rust-lang/docker-rust/0fc94fa4d5bac5532a9adf8e4f8b0fe6deca7d44/stable/bookworm/Dockerfile \
+  "$CQ_PUBLIC/docker-rust-bookworm-Dockerfile" \
+  ed16533e3dd876efc01a8b9198f5b94c00cae9a800aab1024bee7a0f99a7970a
+
+/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 - \
+  "$CQ_PUBLIC/rust-image-metadata/bookworm" <<'PY_OCI_METADATA'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import urllib.request
+
+output = Path(sys.argv[1])
+manifest_digest = "cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d"
+config_digest = "ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26"
+user_agent = "codiquary-public-input-restoration/1"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+token_request = urllib.request.Request(
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository%3Alibrary%2Frust%3Apull",
+    headers={"User-Agent": user_agent},
+)
+with opener.open(token_request) as response:
+    token = json.load(response)["token"]
+
+def get(url: str, accept: str | None = None) -> tuple[bytes, str | None]:
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": user_agent}
+    if accept is not None:
+        headers["Accept"] = accept
+    request = urllib.request.Request(url, headers=headers)
+    with opener.open(request) as response:
+        return response.read(), response.headers.get("Docker-Content-Digest")
+
+manifest_bytes, observed_digest = get(
+    "https://registry-1.docker.io/v2/library/rust/manifests/sha256:" + manifest_digest,
+    "application/vnd.oci.image.manifest.v1+json, "
+    "application/vnd.docker.distribution.manifest.v2+json",
+)
+if hashlib.sha256(manifest_bytes).hexdigest() != manifest_digest:
+    raise SystemExit("base manifest checksum mismatch")
+if observed_digest not in (None, "sha256:" + manifest_digest):
+    raise SystemExit("base manifest response digest mismatch")
+manifest = json.loads(manifest_bytes)
+if manifest["config"]["digest"] != "sha256:" + config_digest:
+    raise SystemExit("base manifest config digest mismatch")
+
+config_bytes, _ = get(
+    "https://registry-1.docker.io/v2/library/rust/blobs/sha256:" + config_digest
+)
+if hashlib.sha256(config_bytes).hexdigest() != config_digest:
+    raise SystemExit("base config checksum mismatch")
+
+for name, payload in (("manifest.json", manifest_bytes), ("config.json", config_bytes)):
+    destination = output / name
+    temporary = output / (name + ".partial")
+    with temporary.open("xb") as stream:
+        stream.write(payload)
+    os.replace(temporary, destination)
+PY_OCI_METADATA
+
+(
+  cd "$CQ_INPUTS"
+  sha256sum -c "$CQ_PROOF/source-archives.sha256"
+)
+(
+  cd "$CQ_PUBLIC"
+  printf '%s  %s\n' \
+    ed16533e3dd876efc01a8b9198f5b94c00cae9a800aab1024bee7a0f99a7970a \
+    docker-rust-bookworm-Dockerfile \
+    cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d \
+    rust-image-metadata/bookworm/manifest.json \
+    ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26 \
+    rust-image-metadata/bookworm/config.json \
+    | sha256sum -c -
+)
+
+cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-pull \
+  pull --platform linux/amd64 "$CQ_BASE" \
+  >"$CQ_ACQ_LOGS/base-pull.log" 2>&1
+cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-inspect \
+  image inspect "$CQ_BASE" \
+  >"$CQ_ACQ/base-image-inspect.json"
+
+/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+  "$CQ_ACQ/base-image-inspect.json" \
+  "$CQ_PUBLIC/rust-image-metadata/bookworm/manifest.json" \
+  "$CQ_PUBLIC/rust-image-metadata/bookworm/config.json" <<'PY_BASE_INSPECT'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+inspection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+manifest_bytes = Path(sys.argv[2]).read_bytes()
+config_bytes = Path(sys.argv[3]).read_bytes()
+manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+if manifest_sha256 != "cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d":
+    raise SystemExit("base manifest digest drift")
+if config_sha256 != "ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26":
+    raise SystemExit("base config digest drift")
+if len(inspection) != 1:
+    raise SystemExit("expected one base image inspection")
+image = inspection[0]
+if image["Digest"] != "sha256:" + manifest_sha256:
+    raise SystemExit("base inspection manifest mismatch")
+if image["Id"].removeprefix("sha256:") != config_sha256:
+    raise SystemExit("base inspection config mismatch")
+if image["Architecture"] != "amd64" or image["Os"] != "linux":
+    raise SystemExit("base inspection platform mismatch")
+PY_BASE_INSPECT
+
+CQ_EMPTY_STDIN="$CQ_ACQ_EVIDENCE/empty-stdin"
+: > "$CQ_EMPTY_STDIN"
+chmod 400 "$CQ_EMPTY_STDIN"
+# The single-quoted program expands in the container.
+# shellcheck disable=SC2016
+cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" debian-acquisition \
+  --controller-stdin "$CQ_EMPTY_STDIN" "$CQ_EMPTY_CONFIG_SHA256" \
+  run --rm --pull=never --network=pasta \
+  --security-opt=no-new-privileges \
+  --mount "type=bind,src=$CQ_ACQ,dst=/out,rw=true" \
+  "$CQ_BASE" /bin/bash -c '
+    set -euo pipefail
+
+    dpkg-query -W > /out/base-packages.txt
+    rustup component list --installed > /out/base-rust-components.txt
+    for tool in cmake python3 ip; do
+      if command -v "$tool"; then
+        command -v "$tool"
+      else
+        printf "missing:%s\n" "$tool"
+      fi
+    done > /out/base-tool-paths.txt
+
+    printf "%s\n" \
+      "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260825T000000Z/ bookworm main" \
+      > /out/debian.sources.list
+    mkdir -p /out/apt-lists/partial /out/debs/partial
+    chmod 1777 /out/apt-lists /out/apt-lists/partial /out/debs /out/debs/partial
+
+    apt_options=(
+      -o Dir::Etc::sourcelist=/out/debian.sources.list
+      -o Dir::Etc::sourceparts=-
+      -o Dir::State::lists=/out/apt-lists
+      -o Dir::Cache::archives=/out/debs
+      -o Acquire::Check-Valid-Until=false
+    )
+
+    apt-get "${apt_options[@]}" update
+    apt-cache "${apt_options[@]}" policy \
+      cmake libclang-14-dev python3 iproute2 \
+      > /out/requested-package-policy.txt
+    apt-get "${apt_options[@]}" --download-only --assume-yes \
+      --no-install-recommends install \
+      cmake libclang-14-dev python3 iproute2
+
+    (
+      cd /out/debs
+      find . -maxdepth 1 -type f -name "*.deb" -print \
+        | LC_ALL=C sort \
+        | while IFS= read -r archive; do sha256sum "$archive"; done \
+        > /out/debs.sha256
+    )
+    find /out/debs -maxdepth 1 -type f -name "*.deb" -print \
+      | LC_ALL=C sort \
+      | while IFS= read -r archive; do
+          printf "%s\t%s\t%s\t%s\n" \
+            "$(basename "$archive")" \
+            "$(dpkg-deb -f "$archive" Package)" \
+            "$(dpkg-deb -f "$archive" Version)" \
+            "$(dpkg-deb -f "$archive" Architecture)"
+        done > /out/deb-packages.tsv
+    (
+      cd /out
+      find apt-lists -type f -print \
+        | LC_ALL=C sort \
+        | while IFS= read -r file; do sha256sum "$file"; done \
+        > apt-lists.sha256
+    )
+    rm -rf /out/apt-lists/partial /out/debs/partial
+  ' >"$CQ_ACQ_LOGS/debian-acquisition.log" 2>&1
+
+CQ_RUST_DIST="$CQ_ACQ/rust-dist"
+mkdir "$CQ_RUST_DIST"
+cq_download_public \
+  https://static.rust-lang.org/dist/channel-rust-1.98.1.toml \
+  "$CQ_RUST_DIST/channel-rust-1.98.1.toml" \
+  a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e
+cq_download_public \
+  https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.sha256 \
+  "$CQ_RUST_DIST/channel-rust-1.98.1.toml.sha256" \
+  48632299e2889ef236ef5411123148c86baef9816a662af28e98784771484260
+expected_channel=$(/usr/bin/awk '{print $1}' \
+  "$CQ_RUST_DIST/channel-rust-1.98.1.toml.sha256")
+actual_channel=$(/usr/bin/sha256sum \
+  "$CQ_RUST_DIST/channel-rust-1.98.1.toml" | /usr/bin/awk '{print $1}')
+test "$actual_channel" = "$expected_channel"
+
+/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+  "$CQ_RUST_DIST" <<'PY_RUST_COMPONENTS'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tomllib
+import urllib.parse
+import urllib.request
+
+output = Path(sys.argv[1])
+manifest = tomllib.loads(
+    (output / "channel-rust-1.98.1.toml").read_text(encoding="utf-8")
+)
+target = "x86_64-unknown-linux-gnu"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+receipt = []
+
+for package in ("rustfmt-preview", "clippy-preview"):
+    entry = manifest["pkg"][package]["target"][target]
+    if not entry.get("available", False):
+        raise SystemExit(f"unavailable Rust component: {package} {target}")
+    url = entry["xz_url"]
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "static.rust-lang.org":
+        raise SystemExit(f"unexpected Rust component origin: {url}")
+    expected = entry["xz_hash"]
+    destination = output / Path(parsed.path).name
+    temporary = output / (destination.name + ".partial")
+    digest = hashlib.sha256()
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "codiquary-public-input-restoration/1"}
+    )
+    with opener.open(request) as response, temporary.open("xb") as stream:
+        while chunk := response.read(1024 * 1024):
+            digest.update(chunk)
+            stream.write(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise SystemExit(f"Rust component checksum mismatch: {package}")
+    os.replace(temporary, destination)
+    receipt.append(
+        {
+            "file": destination.name,
+            "package": package,
+            "sha256": actual,
+            "target": target,
+            "url": url,
+        }
+    )
+
+(output / "components.json").write_text(
+    json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY_RUST_COMPONENTS
+
+CQ_RUST_INPUTS_TMP="$CQ_ACQ_EVIDENCE/.rust-dist-inputs.sha256.partial"
+test ! -e "$CQ_RUST_INPUTS_TMP"
+(
+  cd "$CQ_RUST_DIST"
+  find . -maxdepth 1 -type f ! -name inputs.sha256 -print \
+    | LC_ALL=C sort \
+    | while IFS= read -r file; do sha256sum "$file"; done
+) > "$CQ_RUST_INPUTS_TMP"
+/usr/bin/mv --no-target-directory \
+  "$CQ_RUST_INPUTS_TMP" "$CQ_RUST_DIST/inputs.sha256"
+(cd "$CQ_RUST_DIST" && sha256sum --check --strict inputs.sha256)
+
+(
+  cd "$CQ_ACQ"
+  sha256sum --check --strict apt-lists.sha256
+  (cd debs && sha256sum --check --strict ../debs.sha256)
+  (cd rust-dist && sha256sum --check --strict inputs.sha256)
+)
+
+install -m 0644 "$CQ_PROOF/executor/inputs.sha256" \
+  "$CQ_ACQ_EVIDENCE/committed-inputs.sha256"
+: > "$CQ_ACQ_EVIDENCE/restored-inputs.sha256"
+: > "$CQ_ACQ_EVIDENCE/input-classification.tsv"
+while read -r committed relative; do
+  case "$relative" in
+    base/image-inspect.json)
+      source="$CQ_ACQ/base-image-inspect.json"
+      class=generated-observation
+      ;;
+    base/Dockerfile)
+      source="$CQ_PUBLIC/docker-rust-bookworm-Dockerfile"
+      class=reproducible-source
+      ;;
+    base/manifest.json|base/config.json)
+      source="$CQ_PUBLIC/rust-image-metadata/bookworm/${relative##*/}"
+      class=reproducible-source
+      ;;
+    apt-lists/*_InRelease|apt-lists/*_Packages.lz4|debs/*.deb|\
+    rust-dist/channel-rust-1.98.1.toml|\
+    rust-dist/channel-rust-1.98.1.toml.sha256|\
+    rust-dist/clippy-1.98.1-x86_64-unknown-linux-gnu.tar.xz|\
+    rust-dist/rustfmt-1.98.1-x86_64-unknown-linux-gnu.tar.xz)
+      source="$CQ_ACQ/$relative"
+      class=reproducible-source
+      ;;
+    debian.sources.list)
+      source="$CQ_ACQ/$relative"
+      class=fixed-recipe
+      ;;
+    *)
+      source="$CQ_ACQ/$relative"
+      class=generated-observation
+      ;;
+  esac
+  test -f "$source" && test ! -L "$source"
+  actual=$(sha256sum "$source" | awk '{print $1}')
+  printf '%s  %s\n' "$actual" "$relative" \
+    >> "$CQ_ACQ_EVIDENCE/restored-inputs.sha256"
+  printf '%s\t%s\n' "$relative" "$class" \
+    >> "$CQ_ACQ_EVIDENCE/input-classification.tsv"
+  if [[ "$class" != generated-observation ]]; then
+    test "$actual" = "$committed"
+  fi
+done < "$CQ_PROOF/executor/inputs.sha256"
+
+awk '$2 != "base/Dockerfile" && $2 != "base/manifest.json" && \
+  $2 != "base/config.json" {print $2}' \
+  "$CQ_PROOF/executor/inputs.sha256" | LC_ALL=C sort \
+  > "$CQ_ACQ_EVIDENCE/expected-executor-inputs.txt"
+find "$CQ_ACQ" -type f -printf '%P\n' \
+  | sed 's|^base-image-inspect\.json$|base/image-inspect.json|' \
+  | LC_ALL=C sort \
+  > "$CQ_ACQ_EVIDENCE/actual-executor-inputs.txt"
+cmp "$CQ_ACQ_EVIDENCE/expected-executor-inputs.txt" \
+  "$CQ_ACQ_EVIDENCE/actual-executor-inputs.txt"
+
+input_diff_status=0
+(
+  cd "$CQ_ACQ_EVIDENCE"
+  diff -u committed-inputs.sha256 restored-inputs.sha256 > input-diff.txt
+) || input_diff_status=$?
+test "$input_diff_status" -le 1
+
+for receipt in base-pull base-inspect debian-acquisition; do
+  test "$(cq_controller_receipt_status \
+    "$CQ_ACQ_CONTROLLER/controller/$receipt")" -eq 0
+done
+
+(
+  cd "$CQ_RESTORATION_ROOT"
+  find public-sources executor-documentation executor-inputs \
+    acquisition-evidence -type f \
+    ! -name restoration-files.sha256 -print \
+    | LC_ALL=C sort \
+    | while IFS= read -r file; do sha256sum "$file"; done \
+    > acquisition-evidence/restoration-files.sha256
+  sha256sum --check --strict acquisition-evidence/restoration-files.sha256
+)
+```
+
+The 40 committed executor-input entries have three evidence classes. The fixed
+Git Dockerfile, content-addressed OCI manifest and config, two Debian snapshot
+index files, 19 Debian archives, Rust channel manifest and checksum, and two
+Rust component archives are reproducible source bytes. `debian.sources.list`
+is fixed recipe data. The other 11 entries are generated observations or
+mechanical projections: local base inspection and inventories, APT state and
+policy, package and checksum projections, and Rust component and checksum
+projections. They remain observations even when their bytes reproduce.
+Acquisition requires every reproducible source and fixed recipe
+digest to match its committed digest. It records generated-byte differences
+without treating historical equality as a prerequisite.
+
+Freeze the complete restoration root without rewriting any receipt. Review
+`restoration-files.sha256`, every completed controller receipt,
+`input-classification.tsv`, and `input-diff.txt`. A reproducible-source mismatch
+stops restoration. If only generated observations changed, review the new bytes
+and their derivation, then replace only those entries in
+`executor/inputs.sha256` and update the Containerfile's embedded input-manifest
+digest to the SHA-256 of the completed manifest. Renew every affected source
+focus before construction. Matching bytes still require this fresh receipt and
+review; equality does not turn the historical run into current evidence.
+
 Acquisition, construction, and execution are coordinator-owned phases. Call
 `cq_prepare_podman_state` once for each fresh acquisition, construction, and
 execution state before its first controller action. A retained acquisition
@@ -877,10 +1327,119 @@ Cargo and Rust front-end variables to those direct files, and omits
 preflight require and hash those files. The `/usr/local/cargo/bin` rustup proxy
 directory is not on the phase `PATH`.
 
-No first-slice or final command may reuse the resolution cache. Before either
-execution, the coordinator populates a fresh task-owned Cargo home from both
-reviewed locks and verifies every cached registry archive against its lockfile
-checksum. Acquisition is allowed network access; execution is not. The verified
+### Restore the Linux Cargo resolution home
+
+No first-slice or final command may reuse the resolution cache. After reviewing
+the restored public source bytes, the coordinator reconstructs the prepared
+source tree and populates one new task-owned resolution home with exactly two
+online `cargo fetch --locked` actions, one per unchanged lock and without
+`--target`, so Cargo requests all target dependencies. The unchanged normalizer
+requires both locks' complete registry package union. This replaces, and does
+not rely on, any existing ignored `.work/tough` tree. Set the two tool paths to
+direct Rust 1.98.1 binaries; this procedure installs no host package or toolchain.
+
+```sh
+set -euo pipefail
+
+CQ_REPO=$(git rev-parse --show-toplevel)
+CQ_PROOF="$CQ_REPO/proofs/exact-target-tough"
+CQ_INPUTS=${CQ_INPUTS:?set the reviewed restored public-source directory}
+CQ_CARGO_ACQUISITION_ROOT=${CQ_CARGO_ACQUISITION_ROOT:?set a new task-owned Cargo acquisition root}
+CQ_RESOLUTION_CARGO_HOME="$CQ_CARGO_ACQUISITION_ROOT/cargo-home"
+CQ_CARGO_HOST_HOME="$CQ_CARGO_ACQUISITION_ROOT/host-home"
+CQ_CARGO_ACQUISITION_EVIDENCE="$CQ_CARGO_ACQUISITION_ROOT/evidence"
+CQ_CARGO_BIN=${CQ_CARGO_BIN:?set the direct Cargo 1.98.1 executable}
+CQ_RUSTC_BIN=${CQ_RUSTC_BIN:?set the direct rustc 1.98.1 executable}
+
+[[ "$CQ_CARGO_ACQUISITION_ROOT" = /* && \
+  "$CQ_CARGO_ACQUISITION_ROOT" != *,* && \
+  "$CQ_CARGO_ACQUISITION_ROOT" != *$'\n'* ]]
+[[ "$CQ_CARGO_BIN" = /* && "$CQ_CARGO_BIN" != *$'\n'* && \
+  "$CQ_RUSTC_BIN" = /* && "$CQ_RUSTC_BIN" != *$'\n'* ]]
+test -f "$CQ_CARGO_BIN" && test ! -L "$CQ_CARGO_BIN" \
+  && test -x "$CQ_CARGO_BIN"
+test -f "$CQ_RUSTC_BIN" && test ! -L "$CQ_RUSTC_BIN" \
+  && test -x "$CQ_RUSTC_BIN"
+CQ_CARGO_ACQUISITION_PARENT=$(dirname "$CQ_CARGO_ACQUISITION_ROOT")
+test -d "$CQ_CARGO_ACQUISITION_PARENT" \
+  && test ! -L "$CQ_CARGO_ACQUISITION_PARENT"
+test "$(cd "$CQ_CARGO_ACQUISITION_PARENT" && pwd -P)" = \
+  "$CQ_CARGO_ACQUISITION_PARENT"
+test ! -e "$CQ_CARGO_ACQUISITION_ROOT"
+mkdir -p "$CQ_RESOLUTION_CARGO_HOME" "$CQ_CARGO_HOST_HOME" \
+  "$CQ_CARGO_ACQUISITION_EVIDENCE"
+chmod 700 "$CQ_CARGO_ACQUISITION_ROOT" "$CQ_RESOLUTION_CARGO_HOME" \
+  "$CQ_CARGO_HOST_HOME" "$CQ_CARGO_ACQUISITION_EVIDENCE"
+
+test -z "$(git -C "$CQ_REPO" status --porcelain=v1)"
+(
+  cd "$CQ_INPUTS"
+  sha256sum -c "$CQ_PROOF/source-archives.sha256"
+)
+printf '%s  %s\n' \
+  1d69534c34fc55d999c7cac409c5b44d2f036e6612e37a3021eb6f3d01cf57f4 \
+  "$CQ_PROOF/Cargo.lock" \
+  12c719f55434cde51602fc3c9da6145d509fac93831c80d529f5f8b33930b5fb \
+  "$CQ_PROOF/locks/tough-workspace.Cargo.lock" \
+  | sha256sum -c -
+
+"$CQ_PROOF/scripts/prepare-sources.sh" \
+  --all "$CQ_INPUTS" "$CQ_PROOF/.work/tough"
+
+cargo_environment=(
+  /usr/bin/env -i
+  "HOME=$CQ_CARGO_HOST_HOME"
+  "CARGO_HOME=$CQ_RESOLUTION_CARGO_HOME"
+  CARGO_NET_GIT_FETCH_WITH_CLI=false
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+  "RUSTC=$CQ_RUSTC_BIN"
+  "PATH=$(dirname "$CQ_CARGO_BIN"):/usr/bin:/bin"
+)
+case "$("${cargo_environment[@]}" "$CQ_RUSTC_BIN" --version)" in
+  "rustc 1.98.1 "*) ;;
+  *) printf '%s\n' 'rustc 1.98.1 is required' >&2; exit 1 ;;
+esac
+case "$("${cargo_environment[@]}" "$CQ_CARGO_BIN" --version)" in
+  "cargo 1.98.1 "*) ;;
+  *) printf '%s\n' 'Cargo 1.98.1 is required' >&2; exit 1 ;;
+esac
+"${cargo_environment[@]}" "$CQ_RUSTC_BIN" -Vv \
+  > "$CQ_CARGO_ACQUISITION_EVIDENCE/rustc.txt"
+"${cargo_environment[@]}" "$CQ_CARGO_BIN" -Vv \
+  > "$CQ_CARGO_ACQUISITION_EVIDENCE/cargo.txt"
+
+"${cargo_environment[@]}" "$CQ_CARGO_BIN" fetch \
+  --manifest-path "$CQ_PROOF/Cargo.toml" --locked \
+  --config net.offline=false \
+  > "$CQ_CARGO_ACQUISITION_EVIDENCE/proof-fetch.log" 2>&1
+"${cargo_environment[@]}" "$CQ_CARGO_BIN" fetch \
+  --manifest-path "$CQ_PROOF/.work/tough/Cargo.toml" --locked \
+  --config net.offline=false \
+  > "$CQ_CARGO_ACQUISITION_EVIDENCE/tough-fetch.log" 2>&1
+
+for prohibited in config config.toml credentials credentials.toml; do
+  test ! -e "$CQ_RESOLUTION_CARGO_HOME/$prohibited"
+done
+(
+  cd "$CQ_RESOLUTION_CARGO_HOME"
+  find . -type f -print | LC_ALL=C sort \
+    | while IFS= read -r file; do sha256sum "$file"; done \
+    > "$CQ_CARGO_ACQUISITION_EVIDENCE/cargo-home-files.sha256"
+)
+sha256sum \
+  "$CQ_PROOF/Cargo.lock" \
+  "$CQ_PROOF/locks/tough-workspace.Cargo.lock" \
+  "$CQ_PROOF/.work/tough/.codiquary-prepared-tree" \
+  "$CQ_CARGO_ACQUISITION_EVIDENCE/rustc.txt" \
+  "$CQ_CARGO_ACQUISITION_EVIDENCE/cargo.txt" \
+  "$CQ_CARGO_ACQUISITION_EVIDENCE/proof-fetch.log" \
+  "$CQ_CARGO_ACQUISITION_EVIDENCE/tough-fetch.log" \
+  "$CQ_CARGO_ACQUISITION_EVIDENCE/cargo-home-files.sha256" \
+  > "$CQ_CARGO_ACQUISITION_EVIDENCE/cargo-acquisition.sha256"
+```
+
+Freeze that root and review the acquisition receipt before normalization.
+Cargo acquisition is allowed network access; execution is not. The verified
 resolution home is never mounted into an executor. Instead, construct a new
 execution home containing only the crates.io `registry` subtree. Reject
 configuration, credentials, symlinks, special files, alternate registries, and
