@@ -12,3 +12,5 @@ that behavior; it does not redefine it. Executable examples should come from
 - `adr/` records accepted architectural decisions.
 - `agents/` documents repository mechanics for coding agents.
 - `provenance/` records the reviewed source decisions and ownership handoff.
+- `repository-controls/` documents contribution and repository-admission
+  controls without granting release or deployment authority.
