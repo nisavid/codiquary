@@ -1,0 +1,2 @@
+Codiquary hosted DCO negative qualification fixture.
+Value-free. Never merge.
