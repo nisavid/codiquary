@@ -657,6 +657,7 @@ cq_download_public() {
   test ! -e "$destination" && test ! -e "$temporary" || return 1
   /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/curl --disable \
     --fail --location --proto '=https' --tlsv1.2 \
+    --user-agent codiquary-public-input-restoration/1 \
     --output "$temporary" "$url"
   printf '%s  %s\n' "$expected" "$temporary" | /usr/bin/sha256sum -c -
   /usr/bin/mv --no-target-directory "$temporary" "$destination"
