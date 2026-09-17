@@ -830,6 +830,15 @@ cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" debian-acquisition \
       --no-install-recommends install \
       cmake libclang-14-dev python3 iproute2
 
+    # The optional empty APT archive lock is acquisition housekeeping, not an
+    # executor input.
+    if [[ -e /out/debs/lock || -L /out/debs/lock ]]; then
+      test -f /out/debs/lock
+      test ! -L /out/debs/lock
+      test ! -s /out/debs/lock
+      rm -- /out/debs/lock
+    fi
+
     (
       cd /out/debs
       find . -maxdepth 1 -type f -name "*.deb" -print \
