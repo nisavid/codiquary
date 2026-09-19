@@ -39,6 +39,11 @@ RUN cd /tmp/codiquary-executor && \
 RUN cd /tmp/codiquary-executor/inputs && \
     mapfile -t archives < <(awk -F '\t' '{print "/tmp/codiquary-executor/inputs/debs/" $1}' deb-packages.tsv) && \
     test "${#archives[@]}" -eq 19 && \
+    for archive in "${archives[@]}"; do \
+      install -m 0644 "$archive" /var/cache/apt/archives/; \
+    done && \
+    (cd /var/cache/apt/archives && \
+      sha256sum --check /tmp/codiquary-executor/inputs/debs.sha256) && \
     apt-get \
       -o Dir::Etc::sourcelist=/dev/null \
       -o Dir::Etc::sourceparts=- \
