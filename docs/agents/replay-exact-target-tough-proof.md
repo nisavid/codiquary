@@ -1955,7 +1955,7 @@ if len(inspection) != 1:
 image = inspection[0]
 if image["Digest"] != identity["manifest"]["digest"]:
     raise SystemExit("build base manifest mismatch")
-if image["Id"] != identity["config"]["digest"]:
+if image["Id"].removeprefix("sha256:") != identity["config"]["digest"].removeprefix("sha256:"):
     raise SystemExit("build base config mismatch")
 if image["Architecture"] != identity["architecture"] or image["Os"] != identity["os"]:
     raise SystemExit("build base platform mismatch")
