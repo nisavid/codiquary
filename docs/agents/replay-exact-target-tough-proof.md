@@ -342,6 +342,12 @@ rechecks those corrected nested manifests before installing anything. It uses
 standard component installers from the two held Rust archives with
 `--disable-ldconfig`.
 
+The derivative records its sorted raw rust-installer ledger at
+`/opt/codiquary/executor/rust-installer-components.txt`. This ledger supports
+direct-toolchain execution; it is not a rustup-mediated component inventory.
+The acquisition-time `base-rust-components.txt` remains the rustup observation
+of the unmodified base image.
+
 Every native OCI action crosses one controller interface. It verifies the
 reviewed Podman, crun, conmon, and pasta bytes immediately before each action,
 selects `/usr/bin/crun` and `/usr/bin/conmon` through Podman's shared global
@@ -3006,7 +3012,7 @@ PY_IMAGE
         /opt/codiquary/executor/added-debian-packages.tsv \
         /opt/codiquary/executor/added-rust-components.json \
         /opt/codiquary/executor/packages.tsv \
-        /opt/codiquary/executor/rust-components.txt \
+        /opt/codiquary/executor/rust-installer-components.txt \
         /opt/codiquary/executor/libclang-target.txt \
         /opt/codiquary/executor/build-network-denial.txt \
         /execution-cargo-home-inventory.json \
@@ -3021,7 +3027,7 @@ PY_IMAGE
         /usr/bin/sha512sum /usr/sbin/ip "$LIBCLANG_PATH"
       cat /opt/codiquary/executor/build-network-denial.txt
       cat /opt/codiquary/executor/packages.tsv
-      cat /opt/codiquary/executor/rust-components.txt
+      cat /opt/codiquary/executor/rust-installer-components.txt
       cat /opt/codiquary/executor/libclang-target.txt
       "$CARGO" -Vv
       "$RUSTC" -Vv

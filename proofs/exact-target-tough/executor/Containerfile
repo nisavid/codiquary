@@ -57,6 +57,13 @@ RUN cd /tmp/codiquary-executor/inputs && \
     done < deb-packages.tsv
 
 RUN cd /tmp/codiquary-executor/inputs/rust-dist && \
+    toolchain_prefix=/usr/local/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu && \
+    toolchain_bin="$toolchain_prefix/bin" && \
+    rustlib="$toolchain_prefix/lib/rustlib" && \
+    test "$(cat "$rustlib/rust-installer-version")" = 3 && \
+    ! grep -Eq '^(clippy-preview|rustfmt-preview)$' "$rustlib/components" && \
+    cp "$rustlib/components" \
+      /tmp/codiquary-executor/base-rust-installer-components.txt && \
     for component in \
       clippy-1.98.1-x86_64-unknown-linux-gnu \
       rustfmt-1.98.1-x86_64-unknown-linux-gnu; do \
@@ -66,9 +73,48 @@ RUN cd /tmp/codiquary-executor/inputs/rust-dist && \
         --disable-ldconfig; \
       rm -rf "$component"; \
     done && \
-    rustup component list --installed | grep -Fx clippy-x86_64-unknown-linux-gnu && \
-    rustup component list --installed | grep -Fx rustfmt-x86_64-unknown-linux-gnu && \
-    toolchain_bin=/usr/local/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin && \
+    test "$(grep -Fxc clippy-preview "$rustlib/components")" -eq 1 && \
+    test "$(grep -Fxc rustfmt-preview "$rustlib/components")" -eq 1 && \
+    cmp \
+      <(grep -Fvx -e clippy-preview -e rustfmt-preview \
+        "$rustlib/components" | LC_ALL=C sort) \
+      <(LC_ALL=C sort \
+        /tmp/codiquary-executor/base-rust-installer-components.txt) && \
+    cmp "$rustlib/manifest-clippy-preview" <(printf '%s\n' \
+      "file:$toolchain_bin/cargo-clippy" \
+      "file:$toolchain_bin/clippy-driver" \
+      "file:$toolchain_prefix/share/doc/clippy/LICENSE-APACHE" \
+      "file:$toolchain_prefix/share/doc/clippy/LICENSE-MIT" \
+      "file:$toolchain_prefix/share/doc/clippy/README.md") && \
+    cmp "$rustlib/manifest-rustfmt-preview" <(printf '%s\n' \
+      "file:$toolchain_bin/cargo-fmt" \
+      "file:$toolchain_bin/rustfmt" \
+      "file:$toolchain_prefix/share/doc/rustfmt/LICENSE-APACHE" \
+      "file:$toolchain_prefix/share/doc/rustfmt/LICENSE-MIT" \
+      "file:$toolchain_prefix/share/doc/rustfmt/README.md") && \
+    printf '%s  %s\n' \
+      56478e37c2bc0a09b7442cb975bad0f00cd16a9c80463daca022756a12ef1b93 "$toolchain_bin/cargo-clippy" \
+      ac4a71be2cb2df0f3947419e757a76dabb6110ce4196e1b0bde43296f702287b "$toolchain_bin/clippy-driver" \
+      d8b56cd45661bfc7ccf4ce5722388cab275f9dabb9e471c922cc80e36bbf9caa "$toolchain_prefix/share/doc/clippy/LICENSE-APACHE" \
+      8d07f0c9c9966be0aaec4196d7863b56ade114e9714dbc31ebba576c0446d2fc "$toolchain_prefix/share/doc/clippy/LICENSE-MIT" \
+      bb0e2952ccbaab4376308b33f12ef083c83448feca3a5530bdd111ee0d625e9b "$toolchain_prefix/share/doc/clippy/README.md" \
+      565dd9620e543887d4b955f6985a903a9ef30ef85b9efeac6c233ccf7aee9b6c "$toolchain_bin/cargo-fmt" \
+      99e625e0640b50d773a0f54b93a7e66a0e89afd5351a4de9a17abe7087c11ac4 "$toolchain_bin/rustfmt" \
+      092c8e82c47fb859d7385253c1b04052dbd65a8bcf0bbd8b6f7dba58a9e8753d "$toolchain_prefix/share/doc/rustfmt/LICENSE-APACHE" \
+      ae0f1f791e3b4faccf981c0b530199235a8b8a021c7ef0c3c85c6c676ea4d27f "$toolchain_prefix/share/doc/rustfmt/LICENSE-MIT" \
+      851c5128590f0c9e63263a9afe534a6a27df9e1a065334534a1e0e77fa4dcb7d "$toolchain_prefix/share/doc/rustfmt/README.md" \
+      | sha256sum --check --strict - && \
+    test "$(stat -c '%a' "$toolchain_bin/cargo-clippy")" = 755 && \
+    test "$(stat -c '%a' "$toolchain_bin/clippy-driver")" = 755 && \
+    test "$(stat -c '%a' "$toolchain_prefix/share/doc/clippy/LICENSE-APACHE")" = 644 && \
+    test "$(stat -c '%a' "$toolchain_prefix/share/doc/clippy/LICENSE-MIT")" = 644 && \
+    test "$(stat -c '%a' "$toolchain_prefix/share/doc/clippy/README.md")" = 644 && \
+    test "$(stat -c '%a' "$toolchain_bin/cargo-fmt")" = 755 && \
+    test "$(stat -c '%a' "$toolchain_bin/rustfmt")" = 755 && \
+    test "$(stat -c '%a' "$toolchain_prefix/share/doc/rustfmt/LICENSE-APACHE")" = 644 && \
+    test "$(stat -c '%a' "$toolchain_prefix/share/doc/rustfmt/LICENSE-MIT")" = 644 && \
+    test "$(stat -c '%a' "$toolchain_prefix/share/doc/rustfmt/README.md")" = 644 && \
+    test "$("$toolchain_bin/rustc" --print sysroot)" = "$toolchain_prefix" && \
     for tool in cargo rustc rustdoc rustfmt cargo-fmt clippy-driver cargo-clippy; do \
       test -f "$toolchain_bin/$tool"; \
       test -x "$toolchain_bin/$tool"; \
@@ -105,8 +151,9 @@ RUN mkdir -p /opt/codiquary/executor /opt/codiquary/lib && \
       /opt/codiquary/executor/added-rust-components.json && \
     LC_ALL=C dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' | \
       LC_ALL=C sort > /opt/codiquary/executor/packages.tsv && \
-    rustup component list --installed | LC_ALL=C sort \
-      > /opt/codiquary/executor/rust-components.txt && \
+    LC_ALL=C sort \
+      /usr/local/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/lib/rustlib/components \
+      > /opt/codiquary/executor/rust-installer-components.txt && \
     printf '%s\n' /usr/lib/x86_64-linux-gnu/libclang-14.so.14.0.6 \
       > /opt/codiquary/executor/libclang-target.txt && \
     rm -rf /tmp/codiquary-executor /var/lib/apt/lists/* /var/cache/apt/archives/*
