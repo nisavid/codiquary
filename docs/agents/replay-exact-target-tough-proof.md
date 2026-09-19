@@ -605,23 +605,45 @@ cq_oci_controller() {
 
 Run this acquisition in the same Bash shell after defining the controller
 above. Set `CQ_RESTORATION_ROOT` to a new task-owned directory in durable task
-storage. The command creates every child path; an existing root stops it.
+storage. Set `CQ_EXPECTED_REVISION` and `CQ_EXPECTED_GUIDE_SHA256` to the
+reviewed commit and the SHA-256 of this guide at that commit. The command
+requires that exact clean source before it creates any output or controller
+state. It creates every child path; an existing root stops it.
 
 Only `CQ_ACQ` is mounted into the acquisition container. The proof
 checkout, public source archives, Cargo homes, controller state, controller
 receipts, and host home remain outside that mount. The controller prepares its
-closed configuration before the first OCI action and retains the same state for
-the later base export.
+closed configuration before the first OCI action. Anonymous registry
+acquisition publishes the original manifest, config, and five compressed layer
+blobs with one deterministic OCI archive and identity. Both acquisition and
+construction load that held archive; neither phase exports the base from
+Podman.
 
 ```sh
 set -euo pipefail
 
+CQ_EXPECTED_REVISION=${CQ_EXPECTED_REVISION:?set the reviewed Git revision}
+CQ_EXPECTED_GUIDE_SHA256=${CQ_EXPECTED_GUIDE_SHA256:?set the reviewed guide SHA-256}
+[[ "$CQ_EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
+[[ "$CQ_EXPECTED_GUIDE_SHA256" =~ ^[0-9a-f]{64}$ ]]
 CQ_REPO=$(git rev-parse --show-toplevel)
+CQ_GUIDE="$CQ_REPO/docs/agents/replay-exact-target-tough-proof.md"
+CQ_OBSERVED_REVISION=$(git -C "$CQ_REPO" rev-parse --verify HEAD)
+test "$CQ_OBSERVED_REVISION" = "$CQ_EXPECTED_REVISION"
+test -z "$(git -C "$CQ_REPO" status --porcelain=v1 --untracked-files=all)"
+test -f "$CQ_GUIDE" && test ! -L "$CQ_GUIDE"
+CQ_OBSERVED_GUIDE_SHA256=$(sha256sum "$CQ_GUIDE" | awk '{print $1}')
+test "$CQ_OBSERVED_GUIDE_SHA256" = "$CQ_EXPECTED_GUIDE_SHA256"
+# Reviewed-source gate ends before output creation.
+
 CQ_PROOF="$CQ_REPO/proofs/exact-target-tough"
 CQ_RESTORATION_ROOT=${CQ_RESTORATION_ROOT:?set a new task-owned restoration root}
 CQ_INPUTS="$CQ_RESTORATION_ROOT/public-sources"
 CQ_PUBLIC="$CQ_RESTORATION_ROOT/executor-documentation"
 CQ_ACQ="$CQ_RESTORATION_ROOT/executor-inputs"
+CQ_BASE_ARCHIVE_ROOT="$CQ_RESTORATION_ROOT/base-archive"
+CQ_BASE_ARCHIVE="$CQ_BASE_ARCHIVE_ROOT/base.oci.tar"
+CQ_BASE_IDENTITY="$CQ_BASE_ARCHIVE_ROOT/base-oci-identity.json"
 CQ_ACQ_STATE="$CQ_RESTORATION_ROOT/podman-acquisition-state"
 CQ_ACQ_EVIDENCE="$CQ_RESTORATION_ROOT/acquisition-evidence"
 CQ_ACQ_CONTROLLER="$CQ_ACQ_EVIDENCE/host-only-controller"
@@ -645,6 +667,11 @@ mkdir -p \
 chmod 700 "$CQ_RESTORATION_ROOT" "$CQ_INPUTS" "$CQ_PUBLIC" \
   "$CQ_ACQ" "$CQ_ACQ_EVIDENCE" "$CQ_ACQ_CONTROLLER" \
   "$CQ_ACQ_LOGS"
+printf 'revision\t%s\nguide_sha256\t%s\n' \
+  "$CQ_OBSERVED_REVISION" "$CQ_OBSERVED_GUIDE_SHA256" \
+  > "$CQ_ACQ_EVIDENCE/source-binding.tsv"
+CQ_ACQ_SOURCE_BINDING_SHA256=$(sha256sum \
+  "$CQ_ACQ_EVIDENCE/source-binding.tsv" | awk '{print $1}')
 cq_prepare_podman_state "$CQ_ACQ_STATE"
 
 cq_download_public() {
@@ -676,61 +703,539 @@ cq_download_public \
   "$CQ_PUBLIC/docker-rust-bookworm-Dockerfile" \
   ed16533e3dd876efc01a8b9198f5b94c00cae9a800aab1024bee7a0f99a7970a
 
-/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 - \
-  "$CQ_PUBLIC/rust-image-metadata/bookworm" <<'PY_OCI_METADATA'
+/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+  "$CQ_PUBLIC/rust-image-metadata/bookworm" \
+  "$CQ_BASE_ARCHIVE_ROOT" <<'PY_OCI_METADATA'
+import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import ssl
 import sys
+import tarfile
+import urllib.error
+import urllib.parse
 import urllib.request
 
-output = Path(sys.argv[1])
-manifest_digest = "cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d"
-config_digest = "ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26"
-user_agent = "codiquary-public-input-restoration/1"
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-token_request = urllib.request.Request(
-    "https://auth.docker.io/token?service=registry.docker.io&scope=repository%3Alibrary%2Frust%3Apull",
-    headers={"User-Agent": user_agent},
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
+OCI_LAYER_GZIP = "application/vnd.oci.image.layer.v1.tar+gzip"
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+REFERENCE_ANNOTATION = "org.opencontainers.image.ref.name"
+TOKEN_URL = (
+    "https://auth.docker.io/token?service=registry.docker.io&"
+    "scope=repository%3Alibrary%2Frust%3Apull"
 )
-with opener.open(token_request) as response:
-    token = json.load(response)["token"]
+REGISTRY_ORIGIN = "https://registry-1.docker.io"
+REPOSITORY = "library/rust"
+USER_AGENT = "codiquary-public-input-restoration/1"
+CHUNK = 1024 * 1024
 
-def get(url: str, accept: str | None = None) -> tuple[bytes, str | None]:
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": user_agent}
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+def make_opener():
+    context = ssl.create_default_context()
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=context),
+        NoRedirect(),
+    )
+
+
+def response_status(response):
+    status = getattr(response, "status", None)
+    if status is None:
+        status = response.getcode()
+    return status
+
+
+def require_exact_response(response, url, status=200):
+    if response_status(response) != status:
+        raise ValueError("unexpected HTTP status")
+    if response.geturl() != url:
+        raise ValueError("request escaped its exact origin")
+
+
+def read_limited(response, limit):
+    payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise ValueError("response exceeded its size limit")
+    return payload
+
+
+def response_digest(response, expected):
+    observed = response.headers.get("Docker-Content-Digest")
+    if observed is not None and observed != expected:
+        raise ValueError("response digest mismatch")
+
+
+def require_sha256_digest(value, name):
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise ValueError(f"{name} is not a sha256 digest")
+    hexadecimal = value.removeprefix("sha256:")
+    if len(hexadecimal) != 64 or any(character not in "0123456789abcdef" for character in hexadecimal):
+        raise ValueError(f"{name} is not a lowercase sha256 digest")
+    return hexadecimal
+
+
+def require_descriptor(descriptor, media_type, name):
+    if not isinstance(descriptor, dict):
+        raise ValueError(f"{name} descriptor is not an object")
+    digest = descriptor.get("digest")
+    require_sha256_digest(digest, f"{name} digest")
+    size = descriptor.get("size")
+    if type(size) is not int or size < 0:
+        raise ValueError(f"{name} size is invalid")
+    if descriptor.get("mediaType") != media_type:
+        raise ValueError(f"{name} media type mismatch")
+    return digest, size
+
+
+def token(opener):
+    request = urllib.request.Request(TOKEN_URL, headers={"User-Agent": USER_AGENT})
+    with opener.open(request) as response:
+        require_exact_response(response, TOKEN_URL)
+        payload = json.loads(read_limited(response, 64 * 1024))
+    if not isinstance(payload, dict):
+        raise ValueError("token response is not an object")
+    value = payload.get("token")
+    if not isinstance(value, str) or not value:
+        raise ValueError("token is missing or empty")
+    return value
+
+
+def registry_request(url, bearer, accept=None):
+    if not url.startswith(REGISTRY_ORIGIN + "/"):
+        raise ValueError("authenticated request has the wrong origin")
+    headers = {"Authorization": f"Bearer {bearer}", "User-Agent": USER_AGENT}
     if accept is not None:
         headers["Accept"] = accept
-    request = urllib.request.Request(url, headers=headers)
+    return urllib.request.Request(url, headers=headers)
+
+
+def manifest_bytes(opener, bearer, manifest_digest):
+    url = f"{REGISTRY_ORIGIN}/v2/{REPOSITORY}/manifests/{manifest_digest}"
+    request = registry_request(url, bearer, OCI_MANIFEST)
     with opener.open(request) as response:
-        return response.read(), response.headers.get("Docker-Content-Digest")
+        require_exact_response(response, url)
+        response_digest(response, manifest_digest)
+        content_type = response.headers.get("Content-Type")
+        if content_type is None or content_type.split(";", 1)[0].strip() != OCI_MANIFEST:
+            raise ValueError("manifest response media type mismatch")
+        payload = read_limited(response, 16 * 1024 * 1024)
+    if "sha256:" + hashlib.sha256(payload).hexdigest() != manifest_digest:
+        raise ValueError("base manifest checksum mismatch")
+    return payload
 
-manifest_bytes, observed_digest = get(
-    "https://registry-1.docker.io/v2/library/rust/manifests/sha256:" + manifest_digest,
-    "application/vnd.oci.image.manifest.v1+json, "
-    "application/vnd.docker.distribution.manifest.v2+json",
-)
-if hashlib.sha256(manifest_bytes).hexdigest() != manifest_digest:
-    raise SystemExit("base manifest checksum mismatch")
-if observed_digest not in (None, "sha256:" + manifest_digest):
-    raise SystemExit("base manifest response digest mismatch")
-manifest = json.loads(manifest_bytes)
-if manifest["config"]["digest"] != "sha256:" + config_digest:
-    raise SystemExit("base manifest config digest mismatch")
 
-config_bytes, _ = get(
-    "https://registry-1.docker.io/v2/library/rust/blobs/sha256:" + config_digest
-)
-if hashlib.sha256(config_bytes).hexdigest() != config_digest:
-    raise SystemExit("base config checksum mismatch")
+def redirect_url(response, initial_url):
+    if response.code not in (307, 308):
+        raise response
+    if response.geturl() != initial_url:
+        raise ValueError("redirect did not originate at the registry URL")
+    location = response.headers.get("Location")
+    if not isinstance(location, str) or not location:
+        raise ValueError("blob redirect is missing a location")
+    if any(character in location for character in "\r\n\\"):
+        raise ValueError("blob redirect location is malformed")
+    parsed = urllib.parse.urlsplit(location)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("blob redirect port is malformed") from None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or port not in (None, 443)
+    ):
+        raise ValueError("blob redirect is outside the closed HTTPS policy")
+    return location
 
-for name, payload in (("manifest.json", manifest_bytes), ("config.json", config_bytes)):
-    destination = output / name
-    temporary = output / (name + ".partial")
+
+def open_blob(opener, bearer, url):
+    try:
+        return opener.open(registry_request(url, bearer)), url
+    except urllib.error.HTTPError as error:
+        location = redirect_url(error, url)
+        error.close()
+    redirected = urllib.request.Request(location, headers={"User-Agent": USER_AGENT})
+    try:
+        response = opener.open(redirected)
+    except urllib.error.HTTPError as error:
+        if error.code in (301, 302, 303, 307, 308):
+            error.close()
+            raise ValueError("second blob redirect is forbidden") from None
+        error.close()
+        raise ValueError("redirected blob request failed") from None
+    return response, location
+
+
+def fetch_blob(opener, bearer, descriptor, destination, name):
+    digest, expected_size = require_descriptor(descriptor, descriptor["mediaType"], name)
+    url = f"{REGISTRY_ORIGIN}/v2/{REPOSITORY}/blobs/{digest}"
+    temporary = destination.with_name(destination.name + ".partial")
+    if destination.exists() or temporary.exists():
+        raise FileExistsError(f"pre-existing {name} output")
+    response, response_url = open_blob(opener, bearer, url)
+    with response:
+        require_exact_response(response, response_url)
+        response_digest(response, digest)
+        length = response.headers.get("Content-Length")
+        if length is not None and (not length.isascii() or not length.isdecimal() or int(length) != expected_size):
+            raise ValueError(f"{name} response length mismatch")
+        observed_size = 0
+        observed_hash = hashlib.sha256()
+        with temporary.open("xb") as stream:
+            while chunk := response.read(CHUNK):
+                observed_size += len(chunk)
+                if observed_size > expected_size:
+                    raise ValueError(f"{name} exceeded its declared size")
+                observed_hash.update(chunk)
+                stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+    if observed_size != expected_size:
+        raise ValueError(f"{name} size mismatch")
+    if "sha256:" + observed_hash.hexdigest() != digest:
+        raise ValueError(f"{name} checksum mismatch")
+    os.replace(temporary, destination)
+    return destination
+
+
+def diff_id(path):
+    observed = hashlib.sha256()
+    with path.open("rb") as compressed, gzip.GzipFile(fileobj=compressed) as stream:
+        while chunk := stream.read(CHUNK):
+            observed.update(chunk)
+    return "sha256:" + observed.hexdigest()
+
+
+def json_bytes(value):
+    return json.dumps(value, separators=(",", ":"), sort_keys=False).encode() + b"\n"
+
+
+def add_tar_bytes(bundle, name, payload):
+    member = tarfile.TarInfo(name)
+    member.size = len(payload)
+    member.mode = 0o644
+    member.mtime = 0
+    member.uid = 0
+    member.gid = 0
+    member.uname = ""
+    member.gname = ""
+    bundle.addfile(member, io.BytesIO(payload))
+
+
+def add_tar_path(bundle, name, path):
+    member = tarfile.TarInfo(name)
+    member.size = path.stat().st_size
+    member.mode = 0o644
+    member.mtime = 0
+    member.uid = 0
+    member.gid = 0
+    member.uname = ""
+    member.gname = ""
+    with path.open("rb") as stream:
+        bundle.addfile(member, stream)
+
+
+def archive_hash(path):
+    observed = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(CHUNK):
+            observed.update(chunk)
+    return observed.hexdigest()
+
+
+def parse_image(manifest_bytes_value, config_bytes_value, manifest_digest, config_digest):
+    if "sha256:" + hashlib.sha256(manifest_bytes_value).hexdigest() != manifest_digest:
+        raise ValueError("archive manifest digest mismatch")
+    manifest = json.loads(manifest_bytes_value)
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+        raise ValueError("manifest schema mismatch")
+    if manifest.get("mediaType") != OCI_MANIFEST:
+        raise ValueError("manifest media type mismatch")
+    config_descriptor = manifest.get("config")
+    observed_config_digest, observed_config_size = require_descriptor(
+        config_descriptor, OCI_CONFIG, "config"
+    )
+    if observed_config_digest != config_digest:
+        raise ValueError("manifest config digest mismatch")
+    if observed_config_size != len(config_bytes_value):
+        raise ValueError("manifest config size mismatch")
+    if "sha256:" + hashlib.sha256(config_bytes_value).hexdigest() != config_digest:
+        raise ValueError("config checksum mismatch")
+    config = json.loads(config_bytes_value)
+    if not isinstance(config, dict) or config.get("architecture") != "amd64" or config.get("os") != "linux":
+        raise ValueError("config platform mismatch")
+    rootfs = config.get("rootfs")
+    if not isinstance(rootfs, dict) or rootfs.get("type") != "layers":
+        raise ValueError("config rootfs mismatch")
+    diff_ids = rootfs.get("diff_ids")
+    layers = manifest.get("layers")
+    if not isinstance(layers, list) or len(layers) != 5:
+        raise ValueError("manifest layer count mismatch")
+    if not isinstance(diff_ids, list) or len(diff_ids) != len(layers):
+        raise ValueError("config diff_id count mismatch")
+    layer_digests = []
+    for index, (layer, observed_diff_id) in enumerate(zip(layers, diff_ids, strict=True)):
+        digest, _ = require_descriptor(layer, OCI_LAYER_GZIP, f"layer {index}")
+        require_sha256_digest(observed_diff_id, f"diff_id {index}")
+        layer_digests.append(digest)
+    if len(set(layer_digests)) != len(layer_digests):
+        raise ValueError("layer digests are not unique")
+    return manifest, config, diff_ids
+
+
+def build_archive(path, manifest_bytes_value, config_bytes_value, manifest, reference, blobs):
+    manifest_digest = "sha256:" + hashlib.sha256(manifest_bytes_value).hexdigest()
+    index = {
+        "schemaVersion": 2,
+        "mediaType": OCI_INDEX,
+        "manifests": [
+            {
+                "mediaType": OCI_MANIFEST,
+                "digest": manifest_digest,
+                "size": len(manifest_bytes_value),
+                "annotations": {REFERENCE_ANNOTATION: reference},
+            }
+        ],
+    }
+    entries = {
+        "oci-layout": json_bytes({"imageLayoutVersion": "1.0.0"}),
+        "index.json": json_bytes(index),
+    }
+    for digest, source in blobs.items():
+        entries["blobs/sha256/" + digest.removeprefix("sha256:")] = source
+    with tarfile.open(path, "x", format=tarfile.USTAR_FORMAT) as bundle:
+        for name in sorted(entries):
+            value = entries[name]
+            if isinstance(value, bytes):
+                add_tar_bytes(bundle, name, value)
+            else:
+                add_tar_path(bundle, name, value)
+
+
+def archive_member_stream(bundle, member):
+    stream = bundle.extractfile(member)
+    if stream is None:
+        raise ValueError("archive member has no bytes")
+    return stream
+
+
+def archive_member_bytes(bundle, member):
+    with archive_member_stream(bundle, member) as stream:
+        return stream.read()
+
+
+def verify_archive(path, manifest_digest, config_digest, reference):
+    expected_blob_names = None
+    with tarfile.open(path, "r:") as bundle:
+        members = bundle.getmembers()
+        names = [member.name for member in members]
+        if len(names) != len(set(names)):
+            raise ValueError("archive has duplicate members")
+        for member in members:
+            parts = Path(member.name).parts
+            if member.name.startswith("/") or ".." in parts or "\\" in member.name:
+                raise ValueError("archive has an unsafe member")
+            if not member.isfile() or member.issym() or member.islnk():
+                raise ValueError("archive has a non-regular member")
+            if (
+                member.mode != 0o644
+                or member.mtime != 0
+                or member.uid != 0
+                or member.gid != 0
+                or member.uname
+                or member.gname
+            ):
+                raise ValueError("archive member metadata mismatch")
+        named = {member.name: member for member in members}
+        if "oci-layout" not in named or "index.json" not in named:
+            raise ValueError("archive layout members are missing")
+        if archive_member_bytes(bundle, named["oci-layout"]) != json_bytes({"imageLayoutVersion": "1.0.0"}):
+            raise ValueError("OCI layout mismatch")
+        index_bytes = archive_member_bytes(bundle, named["index.json"])
+        index = json.loads(index_bytes)
+        expected_descriptor = {
+            "mediaType": OCI_MANIFEST,
+            "digest": manifest_digest,
+            "size": None,
+            "annotations": {REFERENCE_ANNOTATION: reference},
+        }
+        if not isinstance(index, dict) or index.get("schemaVersion") != 2 or index.get("mediaType") != OCI_INDEX:
+            raise ValueError("OCI index mismatch")
+        descriptors = index.get("manifests")
+        if not isinstance(descriptors, list) or len(descriptors) != 1:
+            raise ValueError("OCI index manifest count mismatch")
+        descriptor = descriptors[0]
+        manifest_name = "blobs/sha256/" + manifest_digest.removeprefix("sha256:")
+        if manifest_name not in named:
+            raise ValueError("archive manifest blob is missing")
+        manifest_bytes_value = archive_member_bytes(bundle, named[manifest_name])
+        expected_descriptor["size"] = len(manifest_bytes_value)
+        if descriptor != expected_descriptor:
+            raise ValueError("OCI index descriptor mismatch")
+        config_name = "blobs/sha256/" + config_digest.removeprefix("sha256:")
+        if config_name not in named:
+            raise ValueError("archive config blob is missing")
+        config_bytes_value = archive_member_bytes(bundle, named[config_name])
+        manifest, config, diff_ids = parse_image(
+            manifest_bytes_value, config_bytes_value, manifest_digest, config_digest
+        )
+        blob_digests = [manifest_digest, config_digest] + [layer["digest"] for layer in manifest["layers"]]
+        expected_blob_names = {"blobs/sha256/" + digest.removeprefix("sha256:") for digest in blob_digests}
+        expected_names = sorted({"oci-layout", "index.json"} | expected_blob_names)
+        if names != expected_names:
+            raise ValueError("archive member set or order mismatch")
+        for index_value, (layer, expected_diff_id) in enumerate(zip(manifest["layers"], diff_ids, strict=True)):
+            layer_name = "blobs/sha256/" + layer["digest"].removeprefix("sha256:")
+            member = named[layer_name]
+            if member.size != layer["size"]:
+                raise ValueError(f"archive layer {index_value} size mismatch")
+            with archive_member_stream(bundle, member) as stream:
+                observed_compressed = hashlib.sha256()
+                while chunk := stream.read(CHUNK):
+                    observed_compressed.update(chunk)
+            if "sha256:" + observed_compressed.hexdigest() != layer["digest"]:
+                raise ValueError(f"archive layer {index_value} digest mismatch")
+            observed_uncompressed = hashlib.sha256()
+            with archive_member_stream(bundle, member) as compressed:
+                with gzip.GzipFile(fileobj=compressed) as stream:
+                    while chunk := stream.read(CHUNK):
+                        observed_uncompressed.update(chunk)
+            observed_diff_id = "sha256:" + observed_uncompressed.hexdigest()
+            if observed_diff_id != expected_diff_id:
+                raise ValueError(f"archive layer {index_value} diff_id mismatch")
+        if named[config_name].size != manifest["config"]["size"]:
+            raise ValueError("archive config size mismatch")
+    return {
+        "architecture": config["architecture"],
+        "archive_sha256": archive_hash(path),
+        "config": manifest["config"],
+        "diff_ids": diff_ids,
+        "layers": [
+            {
+                "digest": layer["digest"],
+                "diff_id": diff_ids[index_value],
+                "mediaType": layer["mediaType"],
+                "size": layer["size"],
+            }
+            for index_value, layer in enumerate(manifest["layers"])
+        ],
+        "manifest": {
+            "digest": manifest_digest,
+            "mediaType": OCI_MANIFEST,
+            "size": len(manifest_bytes_value),
+        },
+        "os": config["os"],
+        "reference": reference,
+        "schema": "io.nisavid.codiquary.base-oci-identity/v1",
+    }
+
+
+def write_file(path, payload):
+    temporary = path.with_name(path.name + ".partial")
+    if path.exists() or temporary.exists():
+        raise FileExistsError(f"pre-existing output: {path.name}")
     with temporary.open("xb") as stream:
         stream.write(payload)
-    os.replace(temporary, destination)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def acquire(metadata_output, publication, manifest_digest, config_digest, reference, opener=None):
+    require_sha256_digest(manifest_digest, "accepted manifest digest")
+    require_sha256_digest(config_digest, "accepted config digest")
+    partial = publication.with_name(publication.name + ".partial")
+    if publication.exists() or partial.exists():
+        raise FileExistsError("base archive output already exists")
+    partial.mkdir(mode=0o700)
+    blob_root = partial / "blobs" / "sha256"
+    blob_root.mkdir(parents=True, mode=0o700)
+    opener = make_opener() if opener is None else opener
+    bearer = token(opener)
+    fetched_manifest = manifest_bytes(opener, bearer, manifest_digest)
+    manifest_blob = blob_root / manifest_digest.removeprefix("sha256:")
+    write_file(manifest_blob, fetched_manifest)
+    manifest = json.loads(fetched_manifest)
+    if not isinstance(manifest, dict) or manifest.get("mediaType") != OCI_MANIFEST:
+        raise ValueError("base manifest media type mismatch")
+    config_descriptor = manifest.get("config")
+    observed_config_digest, _ = require_descriptor(config_descriptor, OCI_CONFIG, "config")
+    if observed_config_digest != config_digest:
+        raise ValueError("base manifest config digest mismatch")
+    config_blob = fetch_blob(
+        opener,
+        bearer,
+        config_descriptor,
+        blob_root / config_digest.removeprefix("sha256:"),
+        "config",
+    )
+    config_bytes_value = config_blob.read_bytes()
+    manifest, config, diff_ids = parse_image(
+        fetched_manifest, config_bytes_value, manifest_digest, config_digest
+    )
+    blobs = {manifest_digest: manifest_blob, config_digest: config_blob}
+    for index_value, (layer, expected_diff_id) in enumerate(zip(manifest["layers"], diff_ids, strict=True)):
+        layer_path = fetch_blob(
+            opener,
+            bearer,
+            layer,
+            blob_root / layer["digest"].removeprefix("sha256:"),
+            f"layer {index_value}",
+        )
+        if diff_id(layer_path) != expected_diff_id:
+            raise ValueError(f"layer {index_value} diff_id mismatch")
+        blobs[layer["digest"]] = layer_path
+    archive_partial = partial / "base.oci.tar.partial"
+    build_archive(
+        archive_partial,
+        fetched_manifest,
+        config_bytes_value,
+        manifest,
+        reference,
+        blobs,
+    )
+    identity = verify_archive(archive_partial, manifest_digest, config_digest, reference)
+    identity_bytes = json.dumps(identity, indent=2, sort_keys=True).encode() + b"\n"
+    write_file(partial / "base-oci-identity.json", identity_bytes)
+    os.replace(archive_partial, partial / "base.oci.tar")
+    write_file(metadata_output / "manifest.json", fetched_manifest)
+    write_file(metadata_output / "config.json", config_bytes_value)
+    for path in partial.rglob("*"):
+        os.chmod(path, 0o500 if path.is_dir() else 0o400)
+    os.chmod(partial, 0o500)
+    os.replace(partial, publication)
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit("expected metadata and base-archive output directories")
+    acquire(
+        Path(sys.argv[1]),
+        Path(sys.argv[2]),
+        "sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d",
+        "sha256:ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26",
+        "docker.io/library/rust@sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d",
+    )
+
+
+if __name__ == "__main__":
+    main()
 PY_OCI_METADATA
 
 (
@@ -749,9 +1254,9 @@ PY_OCI_METADATA
     | sha256sum -c -
 )
 
-cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-pull \
-  pull --platform linux/amd64 "$CQ_BASE" \
-  >"$CQ_ACQ_LOGS/base-pull.log" 2>&1
+cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-load \
+  load --input "$CQ_BASE_ARCHIVE" \
+  >"$CQ_ACQ_LOGS/base-load.log" 2>&1
 cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-inspect \
   image inspect "$CQ_BASE" \
   >"$CQ_ACQ/base-image-inspect.json"
@@ -759,7 +1264,8 @@ cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-inspect \
 /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
   "$CQ_ACQ/base-image-inspect.json" \
   "$CQ_PUBLIC/rust-image-metadata/bookworm/manifest.json" \
-  "$CQ_PUBLIC/rust-image-metadata/bookworm/config.json" <<'PY_BASE_INSPECT'
+  "$CQ_PUBLIC/rust-image-metadata/bookworm/config.json" \
+  "$CQ_BASE_IDENTITY" <<'PY_BASE_INSPECT'
 import hashlib
 import json
 from pathlib import Path
@@ -768,6 +1274,7 @@ import sys
 inspection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 manifest_bytes = Path(sys.argv[2]).read_bytes()
 config_bytes = Path(sys.argv[3]).read_bytes()
+identity = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
 manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
 config_sha256 = hashlib.sha256(config_bytes).hexdigest()
 if manifest_sha256 != "cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d":
@@ -783,6 +1290,8 @@ if image["Id"].removeprefix("sha256:") != config_sha256:
     raise SystemExit("base inspection config mismatch")
 if image["Architecture"] != "amd64" or image["Os"] != "linux":
     raise SystemExit("base inspection platform mismatch")
+if image["RootFS"]["Layers"] != identity["diff_ids"]:
+    raise SystemExit("base inspection rootfs mismatch")
 PY_BASE_INSPECT
 
 CQ_EMPTY_STDIN="$CQ_ACQ_EVIDENCE/empty-stdin"
@@ -1022,20 +1531,23 @@ input_diff_status=0
 ) || input_diff_status=$?
 test "$input_diff_status" -le 1
 
-for receipt in base-pull base-inspect debian-acquisition; do
+for receipt in base-load base-inspect debian-acquisition; do
   test "$(cq_controller_receipt_status \
     "$CQ_ACQ_CONTROLLER/controller/$receipt")" -eq 0
 done
 
 (
   cd "$CQ_RESTORATION_ROOT"
-  find public-sources executor-documentation executor-inputs \
+  find public-sources executor-documentation executor-inputs base-archive \
     acquisition-evidence -type f \
     ! -name restoration-files.sha256 -print \
     | LC_ALL=C sort \
     | while IFS= read -r file; do sha256sum "$file"; done \
     > acquisition-evidence/restoration-files.sha256
   sha256sum --check --strict acquisition-evidence/restoration-files.sha256
+  grep -Fx \
+    "$CQ_ACQ_SOURCE_BINDING_SHA256  acquisition-evidence/source-binding.tsv" \
+    acquisition-evidence/restoration-files.sha256
 )
 ```
 
@@ -1051,11 +1563,14 @@ Acquisition requires every reproducible source and fixed recipe
 digest to match its committed digest. It records generated-byte differences
 without treating historical equality as a prerequisite.
 
-Freeze the complete restoration root without rewriting any receipt. Review
+Freeze the complete restoration root without rewriting any receipt. Review the
+separate `base-archive/` blob set, deterministic archive, identity,
 `restoration-files.sha256`, every completed controller receipt,
-`input-classification.tsv`, and `input-diff.txt`. A reproducible-source mismatch
-stops restoration. If only generated observations changed, review the new bytes
-and their derivation, then replace only those entries in
+`input-classification.tsv`, and `input-diff.txt`. The base archive outputs do
+not change the 40-entry executor-input manifest or its 37 restored acquisition
+paths. A reproducible-source mismatch stops restoration. If only generated
+observations changed, review the new bytes and their derivation, then replace
+only those entries in
 `executor/inputs.sha256` and update the Containerfile's embedded input-manifest
 digest to the SHA-256 of the completed manifest. Renew every affected source
 focus before construction. Matching bytes still require this fresh receipt and
@@ -1063,15 +1578,14 @@ review; equality does not turn the historical run into current evidence.
 
 Acquisition, construction, and execution are coordinator-owned phases. Call
 `cq_prepare_podman_state` once for each fresh acquisition, construction, and
-execution state before its first controller action. A retained acquisition
-state must already have that closed configuration; adding it after acquisition
-cannot establish the earlier controller receipts. Construction starts from an
-OCI export of the acquired base but otherwise uses fresh Podman state. It has no
+execution state before its first controller action. Construction revalidates
+and loads the same reviewed base archive into fresh Podman state. It has no
 Cargo home and its context contains only the reviewed Containerfile, input
 manifest, and public input bytes. The source bundle is reviewed before
-construction. Export and load must preserve the accepted base
-platform-manifest and config digests; a changed digest stops the build. The
-build itself uses `--network=none --pull=never`. After iproute2 is installed
+construction. The held archive must preserve the accepted base
+platform-manifest, config, compressed-layer, and rootfs diff-ID sets; a changed
+byte or relationship stops before load or build. The build itself uses
+`--network=none --pull=never`. After iproute2 is installed
 from held bytes, a build stage requires empty IPv4 and IPv6 route tables and
 `ENETUNREACH` for both numeric TEST-NET probes. Its completed receipt is
 retained in the image and repeated in the later preflight; the controller's
@@ -1079,21 +1593,75 @@ build argv and the build log bind that observation to the network-denied build.
 
 Use this exact staging and offline-construction procedure after the source and
 input bundle receives a clean review. It does not execute the derived image or
-any proof candidate:
+any proof candidate. Set `CQ_EXPECTED_REVISION` and
+`CQ_EXPECTED_GUIDE_SHA256` to that review's source binding. Set
+`CQ_ACQ_EVIDENCE` to the frozen acquisition evidence directory and
+`CQ_EXPECTED_ACQUISITION_MANIFEST_SHA256` to the reviewed SHA-256 of its
+`restoration-files.sha256`.
 
 ```sh
 set -euo pipefail
 
+CQ_EXPECTED_REVISION=${CQ_EXPECTED_REVISION:?set the reviewed Git revision}
+CQ_EXPECTED_GUIDE_SHA256=${CQ_EXPECTED_GUIDE_SHA256:?set the reviewed guide SHA-256}
+CQ_EXPECTED_ACQUISITION_MANIFEST_SHA256=${CQ_EXPECTED_ACQUISITION_MANIFEST_SHA256:?set the reviewed acquisition-manifest SHA-256}
+[[ "$CQ_EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
+[[ "$CQ_EXPECTED_GUIDE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$CQ_EXPECTED_ACQUISITION_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
 CQ_REPO=$(git rev-parse --show-toplevel)
+CQ_GUIDE="$CQ_REPO/docs/agents/replay-exact-target-tough-proof.md"
+CQ_OBSERVED_REVISION=$(git -C "$CQ_REPO" rev-parse --verify HEAD)
+test "$CQ_OBSERVED_REVISION" = "$CQ_EXPECTED_REVISION"
+test -z "$(git -C "$CQ_REPO" status --porcelain=v1 --untracked-files=all)"
+test -f "$CQ_GUIDE" && test ! -L "$CQ_GUIDE"
+CQ_OBSERVED_GUIDE_SHA256=$(sha256sum "$CQ_GUIDE" | awk '{print $1}')
+test "$CQ_OBSERVED_GUIDE_SHA256" = "$CQ_EXPECTED_GUIDE_SHA256"
+
 CQ_PROOF="$CQ_REPO/proofs/exact-target-tough"
 CQ_ACQ=${CQ_ACQ:?set the frozen executor-acquisition directory}
+CQ_ACQ_EVIDENCE=${CQ_ACQ_EVIDENCE:?set the frozen acquisition-evidence directory}
 CQ_PUBLIC=${CQ_PUBLIC:?set the frozen public executor-documentation directory}
-CQ_ACQ_STATE=${CQ_ACQ_STATE:?set the task-owned Podman acquisition-state directory}
+CQ_BASE_ARCHIVE_ROOT=${CQ_BASE_ARCHIVE_ROOT:?set the reviewed base-archive directory}
+CQ_BASE_ARCHIVE="$CQ_BASE_ARCHIVE_ROOT/base.oci.tar"
+CQ_BASE_IDENTITY="$CQ_BASE_ARCHIVE_ROOT/base-oci-identity.json"
 CQ_BUILD=${CQ_BUILD:?set a fresh task-owned executor-build directory}
 CQ_BUILD_STATE=${CQ_BUILD_STATE:?set a fresh task-owned Podman build-state directory}
 CQ_BUILD_EVIDENCE=${CQ_BUILD_EVIDENCE:?set a fresh task-owned build-evidence directory}
 CQ_BASE=docker.io/library/rust@sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d
 CQ_TAG=localhost/codiquary-tough-proof:cycle-3-reviewed-source
+
+[[ "$CQ_ACQ_EVIDENCE" = /* && "$CQ_ACQ_EVIDENCE" != *$'\n'* ]]
+CQ_RESTORATION_ROOT=$(dirname "$CQ_ACQ_EVIDENCE")
+test -d "$CQ_RESTORATION_ROOT" && test ! -L "$CQ_RESTORATION_ROOT"
+test "$CQ_ACQ_EVIDENCE" = "$CQ_RESTORATION_ROOT/acquisition-evidence"
+test "$CQ_ACQ" = "$CQ_RESTORATION_ROOT/executor-inputs"
+test "$CQ_PUBLIC" = "$CQ_RESTORATION_ROOT/executor-documentation"
+test "$CQ_BASE_ARCHIVE_ROOT" = "$CQ_RESTORATION_ROOT/base-archive"
+for directory in \
+  "$CQ_ACQ" "$CQ_PUBLIC" "$CQ_BASE_ARCHIVE_ROOT" "$CQ_ACQ_EVIDENCE" \
+  "$CQ_ACQ_EVIDENCE/host-only-controller"; do
+  test -d "$directory" && test ! -L "$directory"
+done
+CQ_ACQUISITION_MANIFEST="$CQ_ACQ_EVIDENCE/restoration-files.sha256"
+test -f "$CQ_ACQUISITION_MANIFEST" && test ! -L "$CQ_ACQUISITION_MANIFEST"
+CQ_OBSERVED_ACQUISITION_MANIFEST_SHA256=$(sha256sum \
+  "$CQ_ACQUISITION_MANIFEST" | awk '{print $1}')
+test "$CQ_OBSERVED_ACQUISITION_MANIFEST_SHA256" = \
+  "$CQ_EXPECTED_ACQUISITION_MANIFEST_SHA256"
+cmp -s \
+  <(printf 'revision\t%s\nguide_sha256\t%s\n' \
+    "$CQ_OBSERVED_REVISION" "$CQ_OBSERVED_GUIDE_SHA256") \
+  "$CQ_ACQ_EVIDENCE/source-binding.tsv"
+(
+  cd "$CQ_RESTORATION_ROOT"
+  sha256sum --check --strict acquisition-evidence/restoration-files.sha256
+)
+CQ_ACQ_CONTROLLER="$CQ_ACQ_EVIDENCE/host-only-controller"
+for receipt in "base-load" "base-inspect" "debian-acquisition"; do
+  test "$(cq_controller_receipt_status \
+    "$CQ_ACQ_CONTROLLER/controller/$receipt")" -eq 0
+done
+# Prerequisite-evidence gate ends before output creation.
 
 test ! -e "$CQ_BUILD"
 test ! -e "$CQ_BUILD_STATE"
@@ -1101,19 +1669,27 @@ test ! -e "$CQ_BUILD_EVIDENCE"
 mkdir -p "$CQ_BUILD/context/inputs/base" \
   "$CQ_BUILD_EVIDENCE/host-only-controller"
 chmod 700 "$CQ_BUILD_EVIDENCE/host-only-controller"
+printf 'revision\t%s\nguide_sha256\t%s\n' \
+  "$CQ_OBSERVED_REVISION" "$CQ_OBSERVED_GUIDE_SHA256" \
+  > "$CQ_BUILD_EVIDENCE/source-binding.tsv"
+printf '%s  %s\n' \
+  "$CQ_OBSERVED_ACQUISITION_MANIFEST_SHA256" "$CQ_ACQUISITION_MANIFEST" \
+  > "$CQ_BUILD_EVIDENCE/acquisition-manifest.sha256"
+sha256sum --check --strict \
+  "$CQ_BUILD_EVIDENCE/acquisition-manifest.sha256"
 cq_prepare_podman_state "$CQ_BUILD_STATE"
 
-python3 - "$CQ_BUILD/context" "$CQ_BUILD_STATE" "$CQ_ACQ_STATE" \
+python3 - "$CQ_BUILD/context" "$CQ_BUILD_STATE" "$CQ_BASE_ARCHIVE_ROOT" \
   "$CQ_BUILD_EVIDENCE/host-only-controller" <<'PY'
 from pathlib import Path
 import sys
 
-context, build_state, acquisition_state, receipts = (
+context, build_state, base_archive, receipts = (
     Path(value).resolve() for value in sys.argv[1:]
 )
 for name, protected in (
     ("build state", build_state),
-    ("acquisition state", acquisition_state),
+    ("base archive", base_archive),
     ("controller receipts", receipts),
 ):
     if context == protected or context in protected.parents or protected in context.parents:
@@ -1159,83 +1735,233 @@ sha256sum "$CQ_BUILD/context/Containerfile" \
 
 CQ_BUILD_CONTROLLER="$CQ_BUILD_EVIDENCE/host-only-controller"
 
-cq_oci_controller "$CQ_ACQ_STATE" "$CQ_BUILD_CONTROLLER" base-save \
-  save --format oci-archive \
-  --output "$CQ_BUILD_EVIDENCE/base.oci.tar" "$CQ_BASE"
-
-python3 - "$CQ_BUILD_EVIDENCE/base.oci.tar" \
-  "$CQ_BUILD_EVIDENCE/base-oci-identity.json" <<'PY'
+python3 -I - "$CQ_BASE_ARCHIVE" "$CQ_BASE_IDENTITY" <<'PY_BASE_ARCHIVE_VALIDATE'
+import gzip
 import hashlib
 import json
-import pathlib
+from pathlib import Path
 import sys
 import tarfile
 
-archive = pathlib.Path(sys.argv[1])
-output = pathlib.Path(sys.argv[2])
-archive_hash = hashlib.sha256()
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
+OCI_LAYER_GZIP = "application/vnd.oci.image.layer.v1.tar+gzip"
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+REFERENCE = "docker.io/library/rust@sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d"
+MANIFEST_DIGEST = "sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d"
+CONFIG_DIGEST = "sha256:ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26"
+CHUNK = 1024 * 1024
+
+
+def sha256_stream(stream):
+    observed = hashlib.sha256()
+    while chunk := stream.read(CHUNK):
+        observed.update(chunk)
+    return observed.hexdigest()
+
+
+def member_stream(bundle, member):
+    stream = bundle.extractfile(member)
+    if stream is None:
+        raise ValueError("archive member has no data")
+    return stream
+
+
+def member_bytes(bundle, member):
+    with member_stream(bundle, member) as stream:
+        return stream.read()
+
+
+archive = Path(sys.argv[1])
+identity_path = Path(sys.argv[2])
+if not archive.is_file() or archive.is_symlink():
+    raise SystemExit("base archive is not a regular held file")
+if not identity_path.is_file() or identity_path.is_symlink():
+    raise SystemExit("base identity is not a regular held file")
+recorded_identity = json.loads(identity_path.read_text(encoding="utf-8"))
 with archive.open("rb") as stream:
-    while chunk := stream.read(1024 * 1024):
-        archive_hash.update(chunk)
-with tarfile.open(archive, "r:*") as bundle:
-    index_bytes = bundle.extractfile("index.json").read()
-    index = json.loads(index_bytes)
-    if len(index["manifests"]) != 1:
-        raise SystemExit("expected one OCI manifest descriptor")
-    descriptor = index["manifests"][0]
-    manifest_digest = descriptor["digest"]
-    manifest_bytes = bundle.extractfile(
-        "blobs/sha256/" + manifest_digest.removeprefix("sha256:")
-    ).read()
-    if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != manifest_digest:
-        raise SystemExit("OCI manifest digest mismatch")
+    observed_archive_sha256 = sha256_stream(stream)
+if recorded_identity.get("archive_sha256") != observed_archive_sha256:
+    raise SystemExit("base archive receipt digest mismatch")
+
+with tarfile.open(archive, "r:") as bundle:
+    members = bundle.getmembers()
+    names = [member.name for member in members]
+    if len(names) != len(set(names)):
+        raise SystemExit("base archive has duplicate members")
+    index_candidates = [member for member in members if member.name == "index.json"]
+    if len(index_candidates) == 1 and index_candidates[0].isfile():
+        preliminary_index = json.loads(member_bytes(bundle, index_candidates[0]))
+        preliminary_descriptors = preliminary_index.get("manifests")
+        if (
+            isinstance(preliminary_descriptors, list)
+            and len(preliminary_descriptors) == 1
+            and preliminary_descriptors[0].get("digest") != MANIFEST_DIGEST
+        ):
+            raise SystemExit("base archive exact manifest mismatch")
+    for member in members:
+        if (
+            member.name.startswith("/")
+            or ".." in Path(member.name).parts
+            or "\\" in member.name
+            or not member.isfile()
+            or member.issym()
+            or member.islnk()
+        ):
+            raise SystemExit("base archive has an unsafe or non-regular member")
+        if (
+            member.mode != 0o644
+            or member.mtime != 0
+            or member.uid != 0
+            or member.gid != 0
+            or member.uname
+            or member.gname
+        ):
+            raise SystemExit("base archive member metadata mismatch")
+    named = {member.name: member for member in members}
+    try:
+        layout_member = named["oci-layout"]
+        index_member = named["index.json"]
+        manifest_name = "blobs/sha256/" + MANIFEST_DIGEST.removeprefix("sha256:")
+        config_name = "blobs/sha256/" + CONFIG_DIGEST.removeprefix("sha256:")
+        manifest_member = named[manifest_name]
+        config_member = named[config_name]
+    except KeyError as error:
+        raise SystemExit(f"base archive member is missing: {error.args[0]}") from None
+    if member_bytes(bundle, layout_member) != b'{"imageLayoutVersion":"1.0.0"}\n':
+        raise SystemExit("base archive OCI layout mismatch")
+    index = json.loads(member_bytes(bundle, index_member))
+    expected_index = {
+        "schemaVersion": 2,
+        "mediaType": OCI_INDEX,
+        "manifests": [
+            {
+                "mediaType": OCI_MANIFEST,
+                "digest": MANIFEST_DIGEST,
+                "size": manifest_member.size,
+                "annotations": {"org.opencontainers.image.ref.name": REFERENCE},
+            }
+        ],
+    }
+    if index != expected_index:
+        raise SystemExit("base archive OCI index mismatch")
+    manifest_bytes = member_bytes(bundle, manifest_member)
+    if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != MANIFEST_DIGEST:
+        raise SystemExit("base archive exact manifest mismatch")
     manifest = json.loads(manifest_bytes)
-    config_digest = manifest["config"]["digest"]
-    config_bytes = bundle.extractfile(
-        "blobs/sha256/" + config_digest.removeprefix("sha256:")
-    ).read()
-    if "sha256:" + hashlib.sha256(config_bytes).hexdigest() != config_digest:
-        raise SystemExit("OCI config digest mismatch")
+    if manifest.get("schemaVersion") != 2 or manifest.get("mediaType") != OCI_MANIFEST:
+        raise SystemExit("base archive manifest shape mismatch")
+    config_descriptor = manifest.get("config")
+    if not isinstance(config_descriptor, dict) or config_descriptor != {
+        "digest": CONFIG_DIGEST,
+        "mediaType": OCI_CONFIG,
+        "size": config_member.size,
+    }:
+        raise SystemExit("base archive config descriptor mismatch")
+    config_bytes = member_bytes(bundle, config_member)
+    if "sha256:" + hashlib.sha256(config_bytes).hexdigest() != CONFIG_DIGEST:
+        raise SystemExit("base archive config digest mismatch")
     config = json.loads(config_bytes)
+    if config.get("architecture") != "amd64" or config.get("os") != "linux":
+        raise SystemExit("base archive platform mismatch")
+    rootfs = config.get("rootfs")
+    if not isinstance(rootfs, dict) or rootfs.get("type") != "layers":
+        raise SystemExit("base archive rootfs mismatch")
+    diff_ids = rootfs.get("diff_ids")
+    layers = manifest.get("layers")
+    if not isinstance(layers, list) or len(layers) != 5:
+        raise SystemExit("base archive layer count mismatch")
+    if not isinstance(diff_ids, list) or len(diff_ids) != len(layers):
+        raise SystemExit("base archive diff_id count mismatch")
+    expected_names = {"oci-layout", "index.json", manifest_name, config_name}
+    observed_layers = []
+    for index_value, (layer, expected_diff_id) in enumerate(zip(layers, diff_ids, strict=True)):
+        if not isinstance(layer, dict) or layer.get("mediaType") != OCI_LAYER_GZIP:
+            raise SystemExit(f"base archive layer {index_value} media type mismatch")
+        digest = layer.get("digest")
+        size = layer.get("size")
+        if (
+            not isinstance(digest, str)
+            or not digest.startswith("sha256:")
+            or len(digest) != 71
+            or any(character not in "0123456789abcdef" for character in digest.removeprefix("sha256:"))
+            or type(size) is not int
+            or size < 0
+        ):
+            raise SystemExit(f"base archive layer {index_value} descriptor mismatch")
+        layer_name = "blobs/sha256/" + digest.removeprefix("sha256:")
+        expected_names.add(layer_name)
+        try:
+            layer_member = named[layer_name]
+        except KeyError:
+            raise SystemExit(f"base archive layer {index_value} is missing") from None
+        if layer_member.size != size:
+            raise SystemExit(f"base archive layer {index_value} size mismatch")
+        with member_stream(bundle, layer_member) as stream:
+            if "sha256:" + sha256_stream(stream) != digest:
+                raise SystemExit(f"base archive layer {index_value} digest mismatch")
+        with member_stream(bundle, layer_member) as compressed:
+            with gzip.GzipFile(fileobj=compressed) as stream:
+                observed_diff_id = "sha256:" + sha256_stream(stream)
+        if observed_diff_id != expected_diff_id:
+            raise SystemExit(f"base archive layer {index_value} diff_id mismatch")
+        observed_layers.append(
+            {
+                "digest": digest,
+                "diff_id": expected_diff_id,
+                "mediaType": OCI_LAYER_GZIP,
+                "size": size,
+            }
+        )
+    if names != sorted(expected_names):
+        raise SystemExit("base archive member set or order mismatch")
 
-identity = {
-    "archive_sha256": archive_hash.hexdigest(),
-    "architecture": config["architecture"],
-    "config_sha256": config_digest.removeprefix("sha256:"),
-    "diff_ids": config["rootfs"]["diff_ids"],
-    "layer_digests": [entry["digest"] for entry in manifest["layers"]],
-    "manifest_sha256": manifest_digest.removeprefix("sha256:"),
-    "os": config["os"],
+observed_identity = {
+    "architecture": "amd64",
+    "archive_sha256": observed_archive_sha256,
+    "config": config_descriptor,
+    "diff_ids": diff_ids,
+    "layers": observed_layers,
+    "manifest": {
+        "digest": MANIFEST_DIGEST,
+        "mediaType": OCI_MANIFEST,
+        "size": len(manifest_bytes),
+    },
+    "os": "linux",
+    "reference": REFERENCE,
+    "schema": "io.nisavid.codiquary.base-oci-identity/v1",
 }
-output.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")
-PY
-
-python3 -I - "$CQ_BUILD_EVIDENCE/base-oci-identity.json" <<'PY'
-import json
-import pathlib
-import sys
-
-identity = json.loads(pathlib.Path(sys.argv[1]).read_text())
-if identity["manifest_sha256"] != "cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d":
-    raise SystemExit("saved base manifest digest mismatch")
-if identity["config_sha256"] != "ef460ef3675d3011ccfbd2bfd1c9239f04c044eee0cc0a3de6aecfd9f390bf26":
-    raise SystemExit("saved base config digest mismatch")
-if identity["architecture"] != "amd64":
-    raise SystemExit("saved base architecture mismatch")
-if identity["os"] != "linux":
-    raise SystemExit("saved base OS mismatch")
-PY
+if recorded_identity != observed_identity:
+    raise SystemExit("base archive identity content mismatch")
+PY_BASE_ARCHIVE_VALIDATE
 
 cq_oci_controller "$CQ_BUILD_STATE" "$CQ_BUILD_CONTROLLER" base-load \
   load \
-  --input "$CQ_BUILD_EVIDENCE/base.oci.tar" \
+  --input "$CQ_BASE_ARCHIVE" \
   > "$CQ_BUILD_EVIDENCE/base-load.txt"
 cq_oci_controller "$CQ_BUILD_STATE" "$CQ_BUILD_CONTROLLER" base-inspect \
   image inspect "$CQ_BASE" \
   > "$CQ_BUILD_EVIDENCE/base-after-load.json"
-test "$(cq_oci_controller "$CQ_BUILD_STATE" "$CQ_BUILD_CONTROLLER" \
-  base-digest image inspect --format '{{.Digest}}' "$CQ_BASE")" = \
-  sha256:cdb2da72943ec036bf0c731ef5ac9e5fb2b1d17d3a9256a581bad64cf6fc093d
+python3 -I - "$CQ_BUILD_EVIDENCE/base-after-load.json" \
+  "$CQ_BASE_IDENTITY" <<'PY_BUILD_BASE_INSPECT'
+import json
+from pathlib import Path
+import sys
+
+inspection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+identity = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+if len(inspection) != 1:
+    raise SystemExit("expected one build base inspection")
+image = inspection[0]
+if image["Digest"] != identity["manifest"]["digest"]:
+    raise SystemExit("build base manifest mismatch")
+if image["Id"] != identity["config"]["digest"]:
+    raise SystemExit("build base config mismatch")
+if image["Architecture"] != identity["architecture"] or image["Os"] != identity["os"]:
+    raise SystemExit("build base platform mismatch")
+if image["RootFS"]["Layers"] != identity["diff_ids"]:
+    raise SystemExit("build base rootfs mismatch")
+PY_BUILD_BASE_INSPECT
 
 cq_oci_controller "$CQ_BUILD_STATE" "$CQ_BUILD_CONTROLLER" \
   derived-offline-build build \
@@ -1298,22 +2024,37 @@ if identity["architecture"] != "amd64" or identity["os"] != "linux":
 output.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")
 PY
 
+for receipt in \
+  base-load base-inspect derived-offline-build derived-inspect derived-save; do
+  test "$(cq_controller_receipt_status \
+    "$CQ_BUILD_CONTROLLER/controller/$receipt")" -eq 0
+done
+
 sha256sum \
-  "$CQ_BUILD_EVIDENCE/base.oci.tar" \
-  "$CQ_BUILD_EVIDENCE/base-oci-identity.json" \
+  "$CQ_BASE_ARCHIVE" \
+  "$CQ_BASE_IDENTITY" \
+  "$CQ_BUILD_EVIDENCE/source-binding.tsv" \
+  "$CQ_BUILD_EVIDENCE/acquisition-manifest.sha256" \
+  "$CQ_BUILD_EVIDENCE/executor-source.sha256" \
   "$CQ_BUILD_EVIDENCE/base-load.txt" \
   "$CQ_BUILD_EVIDENCE/base-after-load.json" \
   "$CQ_BUILD_EVIDENCE/offline-build.txt" \
   "$CQ_BUILD_EVIDENCE/derived-build-inspect.json" \
   "$CQ_BUILD_EVIDENCE/executor.oci.tar" \
   "$CQ_BUILD_EVIDENCE/derived-oci-identity.json" \
+  "$CQ_BUILD_CONTROLLER/controller/base-load/receipt.sha256" \
+  "$CQ_BUILD_CONTROLLER/controller/base-inspect/receipt.sha256" \
+  "$CQ_BUILD_CONTROLLER/controller/derived-offline-build/receipt.sha256" \
+  "$CQ_BUILD_CONTROLLER/controller/derived-inspect/receipt.sha256" \
+  "$CQ_BUILD_CONTROLLER/controller/derived-save/receipt.sha256" \
   > "$CQ_BUILD_EVIDENCE/executor-build-evidence.sha256"
 ```
 
 The tag in that procedure is only a build-time locator. It is never an
-admitted executor root. Freeze the OCI archive, its parsed identity, and build
-inspection together with every host-only controller receipt and the retained
-build-network-denial bytes. The admission preflight below then records the
+admitted executor root. Keep the reviewed base archive and identity frozen with
+the derived OCI archive, its parsed identity, build inspection, every host-only
+controller receipt, and the retained build-network-denial bytes. The admission
+preflight below then records the
 embedded package and component inventories, tool identities, and libclang
 target. Freeze and review those bytes with the source bundle and Cargo
 observations. The reviewed
@@ -4209,11 +4950,14 @@ boundary, or evidence dependency invalidates every affected later gate.
    tough` reachability, build scripts, proc macros, licenses, checksums, and the
    prepared path-source digest before any compilation.
 2. **Offline OCI construction:** before staging or build, require the reviewed
-   executor source/input bundle and acquired-file manifests. Observe valid
-   atomic controller receipts for base save/load/inspection, build, derived
-   inspection, and save, each bound to the closed empty configuration files;
-   exact base and derived OCI identities; all held Debian and Rust-component
-   installations; and retained IPv4/IPv6 build-denial bytes.
+   executor source/input bundle, acquired-file manifests, seven exact public
+   base blobs, deterministic base archive, and its atomic identity. Observe
+   valid controller receipts for acquisition base load/inspection, construction
+   base load/inspection, build, derived inspection, and save, each bound to the
+   closed empty configuration files; exact base manifest, config,
+   compressed-layer, diff-ID, platform, and derived OCI identities; all held
+   Debian and Rust-component installations; and retained IPv4/IPv6 build-denial
+   bytes. No Podman save may intervene before either base load.
 3. **Registry-only execution home:** before copying cache state, require both
    reviewed locks and a fresh resolution home populated only by their two
    fetches. Observe the exact crates.io archive set, every lock checksum, source
