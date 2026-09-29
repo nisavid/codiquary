@@ -355,15 +355,19 @@ option array, records their versions and the exact argv, and writes the result
 to a host-only receipt directory. Podman's [`--conmon` global
 option](https://docs.podman.io/en/v6.1.0/markdown/podman.1.html)
 selects the conmon binary instead of the configured default. Each fresh
-controller state contains only an explicit empty
-`containers.conf` and an explicit empty `mounts.conf` under its read-only
-configuration root. The controller requires rootless Podman, selects both files
-through its scrubbed environment, and verifies their empty-file digest before
-and after every action. The user `mounts.conf` therefore overrides ambient
-system mount defaults, while `CONTAINERS_CONF` prevents ambient container
-defaults from contributing another mount. Podman's version receipt uses the
-same scrubbed environment, task-owned state, storage configuration, runtime
-selection, and configuration files as the action it precedes. The controller
+controller state contains explicit empty `containers.conf` and `mounts.conf`
+files under its read-only configuration root plus a task-owned empty hooks
+directory. The controller requires rootless Podman, selects both files through
+its scrubbed environment, passes the empty directory through global
+`--hooks-dir`, and verifies the files and hook-directory closure before and
+after every action. The user `mounts.conf` therefore overrides ambient system
+mount defaults, `CONTAINERS_CONF` prevents ambient container defaults from
+contributing another mount, and Podman never discovers hooks from a built-in
+host directory. When an action consumes a reviewed external input, the
+controller also hashes that input before and after the call and records both
+checks. Podman's version receipt uses the same scrubbed environment,
+task-owned state, storage configuration, runtime selection, configuration
+files, and hook directory as the action it precedes. The controller
 never changes the caller's shell options. That directory is local review
 evidence: it can contain host paths and must never be mounted into a container
 or published. Public evidence uses the container-only mount projection emitted
@@ -382,8 +386,9 @@ CQ_CRUN_SHA256=aca05aa473e1d81c35efeffbf14b4eeaeab07fb8571f06fa559dd770b5d7d339
 CQ_CONMON_SHA256=bb6dcb31b2a7c055a6fc5b5c4ddfd325ac12036e13e004dcf63eb812a68016d6
 CQ_PASTA_SHA256=e268bd80b093b3582d407996c665b39acdd8938a88ab2f476c2878ad4def9360
 CQ_EMPTY_CONFIG_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+CQ_SECCOMP_SHA256=9b755202516aee4b45d9d411ab800c20fe4f7af97166a93b7f07d5b16c1a4ecd
 readonly CQ_PODMAN_SHA256 CQ_CRUN_SHA256 CQ_CONMON_SHA256 CQ_PASTA_SHA256
-readonly CQ_EMPTY_CONFIG_SHA256
+readonly CQ_EMPTY_CONFIG_SHA256 CQ_SECCOMP_SHA256
 
 cq_prepare_podman_state() {
   test "$#" -eq 1 || return 1
@@ -391,12 +396,12 @@ cq_prepare_podman_state() {
   [[ "$state" = /* && "$state" != *$'\n'* ]] || return 1
   test ! -e "$state" || return 1
   mkdir -p "$state/home" "$state/runtime" "$state/root" "$state/runroot" \
-    "$state/config/containers" || return 1
+    "$state/config/containers" "$state/hooks" || return 1
   : > "$state/config/containers/containers.conf" || return 1
   : > "$state/config/containers/mounts.conf" || return 1
   chmod 700 "$state" "$state/home" "$state/runtime" \
     "$state/root" "$state/runroot" || return 1
-  chmod 500 "$state/config" "$state/config/containers" || return 1
+  chmod 500 "$state/config" "$state/config/containers" "$state/hooks" || return 1
   chmod 400 "$state/config/containers/containers.conf" \
     "$state/config/containers/mounts.conf" || return 1
 }
@@ -459,7 +464,7 @@ cq_oci_controller() {
   [[ "$state" = /* && -d "$state" ]] || return 125
   [[ "$receipt_root" = /* && -d "$receipt_root" ]] || return 125
   [[ "$receipt_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 125
-  for directory in home runtime root runroot config config/containers; do
+  for directory in home runtime root runroot config config/containers hooks; do
     test -d "$state/$directory" && test ! -L "$state/$directory" || return 125
   done
   local containers_conf="$state/config/containers/containers.conf"
@@ -467,11 +472,17 @@ cq_oci_controller() {
   test -f "$containers_conf" && test ! -L "$containers_conf" || return 125
   test -f "$mounts_conf" && test ! -L "$mounts_conf" || return 125
   test ! -s "$containers_conf" && test ! -s "$mounts_conf" || return 125
+  local hooks_dir="$state/hooks"
   test "$(/usr/bin/stat -c '%a' "$state/config")" = 500 || return 125
   test "$(/usr/bin/stat -c '%a' "$state/config/containers")" = 500 \
     || return 125
   test "$(/usr/bin/stat -c '%a' "$containers_conf")" = 400 || return 125
   test "$(/usr/bin/stat -c '%a' "$mounts_conf")" = 400 || return 125
+  test "$(/usr/bin/stat -c '%a' "$hooks_dir")" = 500 || return 125
+  local unexpected_hooks
+  unexpected_hooks=$(/usr/bin/find "$hooks_dir" -mindepth 1 -print -quit) \
+    || return 125
+  test -z "$unexpected_hooks" || return 125
   local unexpected_config
   unexpected_config=$(/usr/bin/find "$state/config" -mindepth 1 \
     ! -path "$state/config/containers" \
@@ -502,7 +513,22 @@ cq_oci_controller() {
     --conmon /usr/bin/conmon
     --cgroup-manager cgroupfs
     --events-backend file
+    --hooks-dir "$hooks_dir"
   )
+
+  local controller_input=
+  local controller_input_sha256=
+  if [[ ${1:-} = --controller-input ]]; then
+    test "$#" -ge 4 || return 125
+    controller_input=$2
+    controller_input_sha256=$3
+    shift 3 || return 125
+    [[ "$controller_input" = /* && "$controller_input" != *$'\n'* ]] \
+      || return 125
+    [[ "$controller_input_sha256" =~ ^[0-9a-f]{64}$ ]] || return 125
+    test -f "$controller_input" && test ! -L "$controller_input" \
+      || return 125
+  fi
 
   local controller_stdin=
   local controller_stdin_sha256=
@@ -530,6 +556,9 @@ cq_oci_controller() {
       "$CQ_PASTA_SHA256" /usr/bin/pasta \
       "$CQ_EMPTY_CONFIG_SHA256" "$containers_conf" \
       "$CQ_EMPTY_CONFIG_SHA256" "$mounts_conf"
+    if [[ -n "$controller_input" ]]; then
+      printf '%s  %s\n' "$controller_input_sha256" "$controller_input"
+    fi
     if [[ -n "$controller_stdin" ]]; then
       printf '%s  %s\n' "$controller_stdin_sha256" "$controller_stdin"
     fi
@@ -566,6 +595,11 @@ cq_oci_controller() {
       status=$?
     fi
   fi
+  test -d "$hooks_dir" && test ! -L "$hooks_dir" || return 125
+  test "$(/usr/bin/stat -c '%a' "$hooks_dir")" = 500 || return 125
+  unexpected_hooks=$(/usr/bin/find "$hooks_dir" -mindepth 1 -print -quit) \
+    || return 125
+  test -z "$unexpected_hooks" || return 125
   {
     printf '%s  %s\n' \
       "$CQ_PODMAN_SHA256" /usr/bin/podman \
@@ -574,6 +608,9 @@ cq_oci_controller() {
       "$CQ_PASTA_SHA256" /usr/bin/pasta \
       "$CQ_EMPTY_CONFIG_SHA256" "$containers_conf" \
       "$CQ_EMPTY_CONFIG_SHA256" "$mounts_conf"
+    if [[ -n "$controller_input" ]]; then
+      printf '%s  %s\n' "$controller_input_sha256" "$controller_input"
+    fi
     if [[ -n "$controller_stdin" ]]; then
       printf '%s  %s\n' "$controller_stdin_sha256" "$controller_stdin"
     fi
@@ -2626,6 +2663,7 @@ Set the Linux boundary from a shell with no ambient Podman variables:
 set -euo pipefail
 CQ_REPO=$(git rev-parse --show-toplevel)
 CQ_PROOF="$CQ_REPO/proofs/exact-target-tough"
+CQ_SECCOMP_PROFILE="$CQ_PROOF/executor/seccomp.json"
 CQ_INPUTS=${CQ_INPUTS:?set the verified public-source directory}
 CQ_CARGO_HOME=${CQ_CARGO_HOME:?set the reviewed registry-only execution Cargo home}
 CQ_CARGO_INVENTORY=${CQ_CARGO_INVENTORY:?set the reviewed Cargo-home inventory JSON}
@@ -2646,11 +2684,15 @@ done
   "$CQ_EXECUTOR_IDENTITY" != *$'\n'* && -f "$CQ_EXECUTOR_IDENTITY" ]]
 [[ "$CQ_CARGO_INVENTORY" = /* && "$CQ_CARGO_INVENTORY" != *,* && \
   "$CQ_CARGO_INVENTORY" != *$'\n'* && -f "$CQ_CARGO_INVENTORY" ]]
+[[ "$CQ_SECCOMP_PROFILE" = /* && "$CQ_SECCOMP_PROFILE" != *,* && \
+  "$CQ_SECCOMP_PROFILE" != *$'\n'* && -f "$CQ_SECCOMP_PROFILE" && \
+  ! -L "$CQ_SECCOMP_PROFILE" ]]
 [[ "$CQ_EXECUTOR_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$CQ_CARGO_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]
 printf '%s  %s\n' \
   "$CQ_EXECUTOR_IDENTITY_SHA256" "$CQ_EXECUTOR_IDENTITY" \
   "$CQ_CARGO_INVENTORY_SHA256" "$CQ_CARGO_INVENTORY" \
+  "$CQ_SECCOMP_SHA256" "$CQ_SECCOMP_PROFILE" \
   | sha256sum -c -
 test -z "$(find "$CQ_PHASE_STATE_ROOT" -mindepth 1 -print -quit)"
 
@@ -2707,6 +2749,7 @@ readonly CQ_EXECUTOR_IDENTITY CQ_EXECUTOR_MANIFEST_SHA256
 readonly CQ_EXECUTOR_CONFIG_SHA256 CQ_EXECUTOR_IMAGE_ID
 readonly CQ_EXECUTOR_IDENTITY_SHA256
 readonly CQ_CARGO_HOME CQ_CARGO_INVENTORY CQ_CARGO_INVENTORY_SHA256
+readonly CQ_SECCOMP_PROFILE CQ_SECCOMP_SHA256
 readonly CQ_PHASE_STATE_ROOT
 readonly CQ_EXECUTION_STATE CQ_BOUNDARY_EVIDENCE
 readonly CQ_PROOF_LOCK_SHA256 CQ_TOUGH_LOCK_SHA256
@@ -2714,7 +2757,16 @@ readonly CQ_RUST_TOOLCHAIN_BIN CQ_NATIVE_PATH CQ_LIBCLANG_PATH CQ_RUST_TARGET
 ```
 
 Define the one Linux execution entry point. Its Podman options are part of the
-evidence contract. `--network=none` creates an unconfigured network namespace;
+evidence contract. The executor explicitly selects
+`proofs/exact-target-tough/executor/seccomp.json`, the unchanged
+`podman-container-tools/container-libs` `common/v0.69.1` profile at commit
+`e47c7ccf66a1b89b0807e053dd426ff26eedd7a7` (SHA-256
+`9b755202516aee4b45d9d411ab800c20fe4f7af97166a93b7f07d5b16c1a4ecd`).
+`seccomp.LICENSE` retains the upstream Apache-2.0 license. The controller binds
+the selected bytes to the create receipt, and initialized admission derives
+the complete Linux/amd64 projection for an empty capability bounding set and
+requires exact parsed structural equality. `--network=none` creates an
+unconfigured network namespace;
 the same container proves empty IPv4 and IPv6 route tables and requires numeric
 TEST-NET connections to fail with `ENETUNREACH` before it executes the phase
 command. The image root and all externally sourced input mounts are read-only.
@@ -2748,8 +2800,13 @@ Security submounts are accepted only when the specification's complete
 defaults from [`go.podman.io/common` 0.69.1](https://github.com/podman-container-tools/container-libs/blob/common/v0.69.1/common/pkg/config/default.go#L38-L86)
 plus [Podman's tagged powercap hardening pass](https://github.com/containers/podman/blob/v6.1.0/libpod/container_internal_linux.go#L708-L712),
 including only the kernel-owned thermal-throttle paths matched by that tagged
-implementation. Each observed security submount must then occupy one of those
-exact destinations with a source equivalent to the kernel `/dev/null` selected
+implementation. Admission observes each declared destination through the
+stable initialized process root: a path that exists there is required to have
+its mask or read-only remount, while a genuinely absent singleton mask remains
+optional. Both the pre-start producer and the in-container consumer perform
+that existence classification and reject a missing required record. Each
+observed security submount must occupy one of those exact destinations with a
+source equivalent to the kernel `/dev/null` selected
 by crun, the
 [crun 1.29.1 shared empty directory](https://github.com/containers/crun/blob/1.29.1/src/libcrun/status.c#L107-L125)
 under the task's closed runtime state, crun's read-only tmpfs fallback, or a
@@ -2832,6 +2889,7 @@ stream.close()' \
   printf '%s  %s\n' \
     "$CQ_EXECUTOR_IDENTITY_SHA256" "$CQ_EXECUTOR_IDENTITY" \
     "$CQ_CARGO_INVENTORY_SHA256" "$CQ_CARGO_INVENTORY" \
+    "$CQ_SECCOMP_SHA256" "$CQ_SECCOMP_PROFILE" \
     > "$phase_boundary/reviewed-inputs.sha256" || return 125
   /usr/bin/sha256sum --check --strict \
     "$phase_boundary/reviewed-inputs.sha256" \
@@ -2938,6 +2996,7 @@ PY_IMAGE
     --no-hosts
     --cap-drop=all
     --security-opt=no-new-privileges
+    --security-opt "seccomp=$CQ_SECCOMP_PROFILE"
     --read-only
     --read-only-tmpfs=false
     --ipc=private
@@ -3227,6 +3286,30 @@ if any(count != 1 for count in readonly_path_counts.values()):
     raise SystemExit("duplicate read-only path destination")
 masked_paths = set(masked_path_counts)
 readonly_paths = set(readonly_path_counts)
+def existing_security_paths(
+    root: Path, destinations: set[str], label: str
+) -> set[str]:
+    existing = set()
+    for destination in destinations:
+        candidate = root / destination.lstrip("/")
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise SystemExit(
+                f"{label} path could not be classified: {destination!r}"
+            ) from error
+        existing.add(destination)
+    return existing
+
+required_masked_paths = existing_security_paths(
+    Path("/"), masked_paths, "post-start masked"
+)
+required_readonly_paths = existing_security_paths(
+    Path("/"), readonly_paths, "post-start read-only"
+)
+required_security_destinations = required_masked_paths | required_readonly_paths
 expected_mounts = {}
 required_record_keys = {
     "access",
@@ -3273,6 +3356,12 @@ for record in provenance["mounts"]:
         raise SystemExit(f"invalid mount provenance record: {destination!r}")
     expected_mounts[destination] = record
 
+missing_required = required_security_destinations - set(expected_mounts)
+if missing_required:
+    raise SystemExit(
+        "mount provenance is missing required security submounts: "
+        f"{sorted(missing_required)!r}"
+    )
 if expected_mounts.get("/", {}).get("source_control") != "reviewed-image-root":
     raise SystemExit("mount provenance has no reviewed image root")
 observed_declared_policy = {
@@ -3388,7 +3477,15 @@ def validate_namespace_stacks(
     records: dict[str, dict[str, object]],
     masked_counts: Counter[str],
     label: str,
+    required_destinations: set[str] | None = None,
 ) -> None:
+    required_destinations = required_destinations or set()
+    missing_required = required_destinations - set(records)
+    if missing_required:
+        raise SystemExit(
+            f"{label} is missing required security submounts: "
+            f"{sorted(missing_required)!r}"
+        )
     for destination, expected in masked_counts.items():
         if expected > 1 and destination not in records:
             raise SystemExit(f"{label} has an unsupported stack: {destination!r}")
@@ -3423,7 +3520,10 @@ observed_mounts = parse_mountinfo(
     Path("/proc/self/mountinfo").read_text(), "post-start container", True
 )
 validate_namespace_stacks(
-    observed_mounts, masked_path_counts, "post-start container"
+    observed_mounts,
+    masked_path_counts,
+    "post-start container",
+    required_security_destinations,
 )
 compare_mount_provenance(expected_mounts, observed_mounts)
 
@@ -3488,7 +3588,9 @@ PY_NETWORK
   local create_stderr="$phase_boundary/container-create-stderr.txt"
   local create_call_status
   if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-    "$CQ_PHASE-create" "${create_arguments[@]}" \
+    "$CQ_PHASE-create" \
+    --controller-input "$CQ_SECCOMP_PROFILE" "$CQ_SECCOMP_SHA256" \
+    "${create_arguments[@]}" \
     > "$create_stdout" 2> "$create_stderr"; then
     create_call_status=0
   else
@@ -3644,7 +3746,7 @@ PY_DECLARED_MOUNTS
     "$phase_boundary/effective-mounts.json" \
     "$phase_boundary/pre-start-mount-provenance.json" \
     "$container_id" "$container_name" "$CQ_EXECUTOR_CONFIG_SHA256" \
-    "$CQ_EXECUTION_STATE" \
+    "$CQ_EXECUTION_STATE" "$CQ_SECCOMP_PROFILE" "$CQ_SECCOMP_SHA256" \
     "$CQ_REPO" /repo ro \
     "$CQ_INPUTS" /inputs ro \
     "$CQ_CARGO_HOME" /cargo ro \
@@ -3674,7 +3776,9 @@ container_id = sys.argv[5]
 container_name = sys.argv[6]
 config_sha256 = sys.argv[7]
 execution_state = Path(sys.argv[8]).resolve(strict=True)
-mount_arguments = sys.argv[9:]
+seccomp_profile_path = Path(sys.argv[9]).resolve(strict=True)
+seccomp_profile_sha256 = sys.argv[10]
+mount_arguments = sys.argv[11:]
 if len(mount_arguments) % 3:
     raise SystemExit("mount expectation arguments are incomplete")
 
@@ -3835,6 +3939,96 @@ if not any(
     for source_root in runtime_source_roots
 ):
     raise SystemExit("effective OCI root escaped task-owned Podman state")
+
+seccomp_linux_config = spec.get("linux")
+if not isinstance(seccomp_linux_config, dict):
+    raise SystemExit("effective OCI specification has no Linux policy")
+if spec.get("process", {}).get("capabilities") != {}:
+    raise SystemExit("effective OCI specification retained capabilities")
+
+def seccomp_errno(symbolic: object, numeric: object) -> int | None:
+    if symbolic:
+        errno_values = {"EINVAL": 22, "ENOSYS": 38, "EPERM": 1}
+        if not isinstance(symbolic, str) or symbolic not in errno_values:
+            raise SystemExit(f"unsupported seccomp errno: {symbolic!r}")
+        return errno_values[symbolic]
+    if numeric is None or type(numeric) is int and 0 <= numeric <= 2**32 - 1:
+        return numeric
+    raise SystemExit(f"invalid seccomp errno: {numeric!r}")
+
+def project_seccomp(profile: object) -> dict[str, object]:
+    if not isinstance(profile, dict):
+        raise SystemExit("reviewed seccomp profile is not an object")
+    arch_map = profile.get("archMap")
+    if not isinstance(arch_map, list):
+        raise SystemExit("reviewed seccomp profile has no architecture map")
+    native = [
+        entry for entry in arch_map
+        if isinstance(entry, dict)
+        and entry.get("architecture") == "SCMP_ARCH_X86_64"
+    ]
+    if len(native) != 1 or not isinstance(native[0].get("subArchitectures"), list):
+        raise SystemExit("reviewed seccomp profile has no unique amd64 mapping")
+    projected = {
+        "architectures": [
+            native[0]["architecture"], *native[0]["subArchitectures"]
+        ],
+        "defaultAction": profile.get("defaultAction"),
+        "defaultErrnoRet": seccomp_errno(
+            profile.get("defaultErrno"), profile.get("defaultErrnoRet")
+        ),
+        "syscalls": [],
+    }
+    syscalls = profile.get("syscalls")
+    if not isinstance(syscalls, list):
+        raise SystemExit("reviewed seccomp profile has no syscall list")
+    for call in syscalls:
+        if not isinstance(call, dict):
+            raise SystemExit("reviewed seccomp profile has a malformed syscall")
+        includes = call.get("includes", {})
+        excludes = call.get("excludes", {})
+        if not isinstance(includes, dict) or not isinstance(excludes, dict):
+            raise SystemExit("reviewed seccomp profile has a malformed filter")
+        if "amd64" in excludes.get("arches", []):
+            continue
+        if includes.get("arches") and "amd64" not in includes["arches"]:
+            continue
+        if includes.get("caps"):
+            continue
+        name = call.get("name", "")
+        names = call.get("names", [])
+        if name and names:
+            raise SystemExit("reviewed seccomp syscall has name and names")
+        if name:
+            names = [name]
+        if not isinstance(names, list) or any(
+            not isinstance(value, str) or not value for value in names
+        ):
+            raise SystemExit("reviewed seccomp syscall has invalid names")
+        projected_call = {"names": names, "action": call.get("action")}
+        errno_ret = seccomp_errno(call.get("errno"), call.get("errnoRet"))
+        if errno_ret is not None:
+            projected_call["errnoRet"] = errno_ret
+        args = []
+        for argument in call.get("args", []):
+            projected_argument = {
+                key: argument[key] for key in ("index", "value", "op")
+            }
+            if argument.get("valueTwo"):
+                projected_argument["valueTwo"] = argument["valueTwo"]
+            args.append(projected_argument)
+        if args:
+            projected_call["args"] = args
+        projected["syscalls"].append(projected_call)
+    return projected
+
+seccomp_profile_bytes = seccomp_profile_path.read_bytes()
+if hashlib.sha256(seccomp_profile_bytes).hexdigest() != seccomp_profile_sha256:
+    raise SystemExit("reviewed seccomp profile digest changed")
+reviewed_seccomp = json.loads(seccomp_profile_bytes)
+expected_seccomp = project_seccomp(reviewed_seccomp)
+if seccomp_linux_config.get("seccomp") != expected_seccomp:
+    raise SystemExit("effective OCI seccomp policy differs from the reviewed profile")
 
 linux_config = spec.get("linux")
 if not isinstance(linux_config, dict):
@@ -4127,7 +4321,15 @@ def validate_namespace_stacks(
     records: dict[str, dict[str, object]],
     masked_counts: Counter[str],
     label: str,
+    required_destinations: set[str] | None = None,
 ) -> None:
+    required_destinations = required_destinations or set()
+    missing_required = required_destinations - set(records)
+    if missing_required:
+        raise SystemExit(
+            f"{label} is missing required security submounts: "
+            f"{sorted(missing_required)!r}"
+        )
     for destination, expected in masked_counts.items():
         if expected > 1 and destination not in records:
             raise SystemExit(f"{label} has an unsupported stack: {destination!r}")
@@ -4150,6 +4352,31 @@ def process_identity() -> tuple[int, str]:
 
 process_identity_before = process_identity()
 target_mountinfo = (process_root / "mountinfo").read_text(encoding="utf-8")
+namespace_root = process_root / "root"
+
+def existing_security_paths(
+    root: Path, destinations: set[str], label: str
+) -> set[str]:
+    existing = set()
+    for destination in destinations:
+        candidate = root / destination.lstrip("/")
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise SystemExit(
+                f"{label} path could not be classified: {destination!r}"
+            ) from error
+        existing.add(destination)
+    return existing
+
+required_masked_paths = existing_security_paths(
+    namespace_root, masked_paths, "initialized masked"
+)
+required_readonly_paths = existing_security_paths(
+    namespace_root, readonly_paths, "initialized read-only"
+)
 process_identity_after = process_identity()
 if process_identity_after != process_identity_before:
     raise SystemExit("initialized container process changed during mount observation")
@@ -4158,7 +4385,10 @@ target_mounts = parse_mountinfo(
     target_mountinfo, "initialized container", True
 )
 validate_namespace_stacks(
-    target_mounts, masked_path_counts, "initialized container"
+    target_mounts,
+    masked_path_counts,
+    "initialized container",
+    required_masked_paths | required_readonly_paths,
 )
 host_mounts = parse_mountinfo(
     Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
@@ -4310,6 +4540,10 @@ def projected_child_root(
 for destination in sorted(readonly_paths):
     observed = remaining_mounts.get(destination)
     if observed is None:
+        if destination in required_readonly_paths:
+            raise SystemExit(
+                f"required read-only remount is absent: {destination!r}"
+            )
         continue
     parents = [
         (path, record)
@@ -4364,6 +4598,8 @@ else:
 for destination in sorted(masked_paths):
     observed = remaining_mounts.get(destination)
     if observed is None:
+        if destination in required_masked_paths:
+            raise SystemExit(f"required masked mount is absent: {destination!r}")
         continue
     container_dev_null_mask = (
         observed["filesystem"] == dev_mount["filesystem"]
