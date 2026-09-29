@@ -3629,7 +3629,7 @@ def mount_options(
     ):
         raise SystemExit(f"malformed effective OCI mount: {destination!r}")
     option_counts = Counter(raw_options)
-    if destination == "/dev/shm" and mount_type == "bind":
+    if destination == "/dev/shm":
         expected_option_counts = Counter(
             {
                 "bind": 1,
@@ -3640,7 +3640,7 @@ def mount_options(
                 "rprivate": 1,
             }
         )
-        if option_counts != expected_option_counts:
+        if mount_type != "bind" or option_counts != expected_option_counts:
             raise SystemExit(f"malformed effective OCI mount: {destination!r}")
     elif any(count != 1 for count in option_counts.values()):
         raise SystemExit(f"malformed effective OCI mount: {destination!r}")
