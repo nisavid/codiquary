@@ -3564,7 +3564,7 @@ if container["HostConfig"].get("AutoRemove") is not False:
     raise SystemExit("initialized container must be retained")
 state = container["State"]
 if (
-    state.get("Status") != "created"
+    state.get("Status") != "initialized"
     or state.get("Running") is not False
     or state.get("Paused") is not False
     or state.get("Restarting") is not False
