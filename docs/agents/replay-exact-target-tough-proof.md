@@ -1297,7 +1297,27 @@ PY_OCI_METADATA
     | sha256sum -c -
 )
 
+CQ_BASE_ARCHIVE_SHA256=$(python3 -I - "$CQ_BASE_IDENTITY" <<'PY_BASE_ARCHIVE_SHA256'
+import json
+import re
+from pathlib import Path
+import sys
+
+identity = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+archive_sha256 = identity.get("archive_sha256")
+if (
+    identity.get("schema") != "io.nisavid.codiquary.base-oci-identity/v1"
+    or not isinstance(archive_sha256, str)
+    or re.fullmatch(r"[0-9a-f]{64}", archive_sha256) is None
+):
+    raise SystemExit("base OCI identity has no valid archive digest")
+print(archive_sha256)
+PY_BASE_ARCHIVE_SHA256
+)
+[[ "$CQ_BASE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
 cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-load \
+  --controller-input "$CQ_BASE_ARCHIVE" "$CQ_BASE_ARCHIVE_SHA256" \
   load --input "$CQ_BASE_ARCHIVE" \
   >"$CQ_ACQ_LOGS/base-load.log" 2>&1
 cq_oci_controller "$CQ_ACQ_STATE" "$CQ_ACQ_CONTROLLER" base-inspect \
@@ -1978,7 +1998,27 @@ if recorded_identity != observed_identity:
     raise SystemExit("base archive identity content mismatch")
 PY_BASE_ARCHIVE_VALIDATE
 
+CQ_BASE_ARCHIVE_SHA256=$(python3 -I - "$CQ_BASE_IDENTITY" <<'PY_BUILD_BASE_ARCHIVE_SHA256'
+import json
+import re
+from pathlib import Path
+import sys
+
+identity = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+archive_sha256 = identity.get("archive_sha256")
+if (
+    identity.get("schema") != "io.nisavid.codiquary.base-oci-identity/v1"
+    or not isinstance(archive_sha256, str)
+    or re.fullmatch(r"[0-9a-f]{64}", archive_sha256) is None
+):
+    raise SystemExit("base OCI identity has no valid archive digest")
+print(archive_sha256)
+PY_BUILD_BASE_ARCHIVE_SHA256
+)
+[[ "$CQ_BASE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
 cq_oci_controller "$CQ_BUILD_STATE" "$CQ_BUILD_CONTROLLER" base-load \
+  --controller-input "$CQ_BASE_ARCHIVE" "$CQ_BASE_ARCHIVE_SHA256" \
   load \
   --input "$CQ_BASE_ARCHIVE" \
   > "$CQ_BUILD_EVIDENCE/base-load.txt"
@@ -2604,31 +2644,46 @@ mkdir -p "$CQ_BOUNDARY_EVIDENCE"
 chmod 700 "$CQ_BOUNDARY_EVIDENCE"
 cq_prepare_podman_state "$CQ_EXECUTION_STATE"
 
-CQ_EXECUTOR_CONFIG_SHA256=$(python3 - "$CQ_EXECUTOR_ARCHIVE" \
+CQ_EXECUTOR_IDENTITY_BINDING=$(python3 - "$CQ_EXECUTOR_ARCHIVE" \
   "$CQ_EXECUTOR_IDENTITY" <<'PY'
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 archive = pathlib.Path(sys.argv[1])
 identity = json.loads(pathlib.Path(sys.argv[2]).read_text())
+archive_sha256 = identity.get("archive_sha256")
+config_sha256 = identity.get("config_sha256")
+if (
+    not isinstance(archive_sha256, str)
+    or re.fullmatch(r"[0-9a-f]{64}", archive_sha256) is None
+    or not isinstance(config_sha256, str)
+    or re.fullmatch(r"[0-9a-f]{64}", config_sha256) is None
+):
+    raise SystemExit("reviewed executor identity has invalid digests")
 archive_hash = hashlib.sha256()
 with archive.open("rb") as stream:
     while chunk := stream.read(1024 * 1024):
         archive_hash.update(chunk)
-if archive_hash.hexdigest() != identity["archive_sha256"]:
+if archive_hash.hexdigest() != archive_sha256:
     raise SystemExit("executor OCI archive differs from reviewed identity")
 if identity["architecture"] != "amd64" or identity["os"] != "linux":
     raise SystemExit("reviewed executor is not linux/amd64")
-print(identity["config_sha256"])
+print(archive_sha256, config_sha256)
 PY
 )
+read -r CQ_EXECUTOR_ARCHIVE_SHA256 CQ_EXECUTOR_CONFIG_SHA256 \
+  <<<"$CQ_EXECUTOR_IDENTITY_BINDING"
+[[ "$CQ_EXECUTOR_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$CQ_EXECUTOR_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
 CQ_EXECUTOR_IMAGE_ID="sha256:$CQ_EXECUTOR_CONFIG_SHA256"
 
 cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-  executor-load load --input "$CQ_EXECUTOR_ARCHIVE" \
+  executor-load \
+  --controller-input "$CQ_EXECUTOR_ARCHIVE" "$CQ_EXECUTOR_ARCHIVE_SHA256" \
+  load --input "$CQ_EXECUTOR_ARCHIVE" \
   > "$CQ_BOUNDARY_EVIDENCE/load.txt"
 cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
   executor-load-inspect image inspect \
