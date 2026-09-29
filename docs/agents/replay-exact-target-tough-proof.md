@@ -4452,25 +4452,43 @@ host_mounts = parse_mountinfo(
 )
 
 def projected_source(source: Path) -> dict[str, str]:
-    candidates = [
+    owning_stacks = [
         (destination, stack)
         for destination, stack in host_mounts.items()
         if source == Path(destination) or Path(destination) in source.parents
     ]
-    if not candidates:
+    if not owning_stacks:
         raise SystemExit(f"no host mount owns admitted source: {source!s}")
     deepest = max(
         len(PurePosixPath(destination).parts)
-        for destination, _ in candidates
+        for destination, _ in owning_stacks
     )
     candidates = [
         (destination, stack)
-        for destination, stack in candidates
+        for destination, stack in owning_stacks
         if len(PurePosixPath(destination).parts) == deepest
     ]
     if len(candidates) != 1 or len(candidates[0][1]) != 1:
         raise SystemExit(f"stacked host source mount rejected: {source!s}")
     host_mount = candidates[0][1][0]
+    host_mounts_by_id = {
+        record["mount_id"]: record
+        for stack in host_mounts.values()
+        for record in stack
+    }
+    ancestor_mount_ids = set()
+    ancestor = host_mount
+    while ancestor is not None:
+        mount_id = ancestor["mount_id"]
+        if mount_id in ancestor_mount_ids:
+            raise SystemExit(f"ambiguous host source mount ancestry: {source!s}")
+        ancestor_mount_ids.add(mount_id)
+        ancestor = host_mounts_by_id.get(ancestor["parent_id"])
+    if any(
+        len(stack) > 1 and stack[-1]["mount_id"] not in ancestor_mount_ids
+        for _, stack in owning_stacks
+    ):
+        raise SystemExit(f"hidden host source mount rejected: {source!s}")
     relative = source.relative_to(Path(host_mount["destination"]))
     projected_root = PurePosixPath(host_mount["root"]).joinpath(
         *PurePosixPath(relative.as_posix()).parts
