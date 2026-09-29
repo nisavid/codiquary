@@ -3389,6 +3389,9 @@ def validate_namespace_stacks(
     masked_counts: Counter[str],
     label: str,
 ) -> None:
+    for destination, expected in masked_counts.items():
+        if expected > 1 and destination not in records:
+            raise SystemExit(f"{label} has an unsupported stack: {destination!r}")
     for destination, record in records.items():
         observed = len(record["mount_chain"])
         expected = masked_counts.get(destination, 0)
@@ -4119,6 +4122,9 @@ def validate_namespace_stacks(
     masked_counts: Counter[str],
     label: str,
 ) -> None:
+    for destination, expected in masked_counts.items():
+        if expected > 1 and destination not in records:
+            raise SystemExit(f"{label} has an unsupported stack: {destination!r}")
     for destination, record in records.items():
         observed = len(record["mount_chain"])
         expected = masked_counts.get(destination, 0)
