@@ -2095,6 +2095,12 @@ requires both locks' complete registry package union. This replaces, and does
 not rely on, any existing ignored `.work/tough` tree. Set the two tool paths to
 direct Rust 1.98.1 binaries; this procedure installs no host package or toolchain.
 
+The `.codiquary-prepared-tree` file is the dependency-checkpoint source listing
+created before this block installs the reviewed workspace lock. Its `Cargo.lock`
+entry therefore binds the archived upstream lock, not the installed reviewed
+lock. The separate installed-lock check and acquisition manifest below bind the
+lock consumed by both fetches.
+
 ```sh
 set -euo pipefail
 
@@ -2141,7 +2147,13 @@ printf '%s  %s\n' \
   | sha256sum -c -
 
 "$CQ_PROOF/scripts/prepare-sources.sh" \
-  --all "$CQ_INPUTS" "$CQ_PROOF/.work/tough"
+  --dependency-checkpoint "$CQ_INPUTS" "$CQ_PROOF/.work/tough"
+cp "$CQ_PROOF/locks/tough-workspace.Cargo.lock" \
+  "$CQ_PROOF/.work/tough/Cargo.lock"
+printf '%s  %s\n' \
+  12c719f55434cde51602fc3c9da6145d509fac93831c80d529f5f8b33930b5fb \
+  "$CQ_PROOF/.work/tough/Cargo.lock" \
+  | sha256sum -c -
 
 cargo_environment=(
   /usr/bin/env -i
@@ -2186,6 +2198,7 @@ done
 sha256sum \
   "$CQ_PROOF/Cargo.lock" \
   "$CQ_PROOF/locks/tough-workspace.Cargo.lock" \
+  "$CQ_PROOF/.work/tough/Cargo.lock" \
   "$CQ_PROOF/.work/tough/.codiquary-prepared-tree" \
   "$CQ_CARGO_ACQUISITION_EVIDENCE/rustc.txt" \
   "$CQ_CARGO_ACQUISITION_EVIDENCE/cargo.txt" \
