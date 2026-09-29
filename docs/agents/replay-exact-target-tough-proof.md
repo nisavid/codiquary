@@ -4048,8 +4048,11 @@ def projected_mount(record: dict[str, object]) -> dict[str, object]:
     }
 
 def parse_mountinfo(
-    text: str, label: str, allow_stacks: bool = False
-) -> dict[str, dict[str, object]]:
+    text: str,
+    label: str,
+    allow_stacks: bool = False,
+    preserve_stacks: bool = False,
+) -> dict[str, object]:
     raw_records = {}
     mount_ids = set()
     for line in text.splitlines():
@@ -4107,6 +4110,9 @@ def parse_mountinfo(
         )
         by_mount_id = {record["mount_id"]: record for record in stack}
         ordered_stack = [by_mount_id[link["mount_id"]] for link in chain]
+        if preserve_stacks:
+            records[destination] = ordered_stack
+            continue
         projection = projected_mount(ordered_stack[0])
         if any(projected_mount(record) != projection for record in ordered_stack[1:]):
             raise SystemExit(
@@ -4157,25 +4163,29 @@ validate_namespace_stacks(
 host_mounts = parse_mountinfo(
     Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
     "controller host",
+    preserve_stacks=True,
 )
 
 def projected_source(source: Path) -> dict[str, str]:
     candidates = [
-        record
-        for destination, record in host_mounts.items()
+        (destination, stack)
+        for destination, stack in host_mounts.items()
         if source == Path(destination) or Path(destination) in source.parents
     ]
     if not candidates:
         raise SystemExit(f"no host mount owns admitted source: {source!s}")
-    deepest = max(len(PurePosixPath(record["destination"]).parts) for record in candidates)
+    deepest = max(
+        len(PurePosixPath(destination).parts)
+        for destination, _ in candidates
+    )
     candidates = [
-        record
-        for record in candidates
-        if len(PurePosixPath(record["destination"]).parts) == deepest
+        (destination, stack)
+        for destination, stack in candidates
+        if len(PurePosixPath(destination).parts) == deepest
     ]
-    if len(candidates) != 1:
+    if len(candidates) != 1 or len(candidates[0][1]) != 1:
         raise SystemExit(f"stacked host source mount rejected: {source!s}")
-    host_mount = candidates[0]
+    host_mount = candidates[0][1][0]
     relative = source.relative_to(Path(host_mount["destination"]))
     projected_root = PurePosixPath(host_mount["root"]).joinpath(
         *PurePosixPath(relative.as_posix()).parts
