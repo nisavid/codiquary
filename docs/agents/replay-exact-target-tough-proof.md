@@ -3094,6 +3094,7 @@ PY_MOUNT_INPUT
       exec 3<&-
       CQ_MOUNT_PROVENANCE_PATH=$mount_provenance_path \
         python3 - <<"PY_MOUNTS"
+from collections import Counter
 import hashlib
 import json
 import os
@@ -3161,7 +3162,7 @@ if (
     or set(provenance)
     != {"container_id", "masked_paths", "mounts", "readonly_paths", "schema"}
     or provenance.get("schema")
-    != "io.nisavid.codiquary.pre-start-mount-provenance/v1"
+    != "io.nisavid.codiquary.pre-start-mount-provenance/v2"
     or not isinstance(provenance.get("container_id"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", provenance["container_id"])
     or not isinstance(provenance.get("masked_paths"), list)
@@ -3170,7 +3171,7 @@ if (
 ):
     raise SystemExit("mount provenance has the wrong schema")
 
-def exact_paths(values: list[object], label: str) -> set[str]:
+def counted_paths(values: list[object], label: str) -> Counter[str]:
     if any(
         not isinstance(value, str)
         or not value.startswith("/")
@@ -3178,31 +3179,87 @@ def exact_paths(values: list[object], label: str) -> set[str]:
         for value in values
     ):
         raise SystemExit(f"invalid {label} destination")
-    if len(set(values)) != len(values):
-        raise SystemExit(f"duplicate {label} destination")
-    return set(values)
+    return Counter(values)
 
-masked_paths = exact_paths(provenance["masked_paths"], "masked path")
-readonly_paths = exact_paths(provenance["readonly_paths"], "readonly path")
+def canonical_mount_chain(
+    value: object, label: str, require_order: bool = False
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise SystemExit(f"{label} has no mount chain")
+    links = []
+    mount_ids = set()
+    for link in value:
+        if (
+            not isinstance(link, dict)
+            or set(link) != {"mount_id", "parent_id"}
+            or any(
+                not isinstance(link[key], str)
+                or not re.fullmatch(r"[1-9][0-9]*", link[key])
+                for key in ("mount_id", "parent_id")
+            )
+            or link["mount_id"] in mount_ids
+        ):
+            raise SystemExit(f"{label} has an invalid mount chain")
+        mount_ids.add(link["mount_id"])
+        links.append(link)
+    roots = [link for link in links if link["parent_id"] not in mount_ids]
+    children = {}
+    for link in links:
+        if link["parent_id"] in mount_ids:
+            children.setdefault(link["parent_id"], []).append(link)
+    if len(roots) != 1 or any(len(group) != 1 for group in children.values()):
+        raise SystemExit(f"{label} has an ambiguous mount chain")
+    ordered = []
+    current = roots[0]
+    while current is not None:
+        ordered.append(current)
+        descendants = children.get(current["mount_id"], [])
+        current = descendants[0] if descendants else None
+    if len(ordered) != len(links):
+        raise SystemExit(f"{label} has an ambiguous mount chain")
+    if require_order and ordered != links:
+        raise SystemExit(f"{label} has a non-canonical mount chain")
+    return ordered
+
+masked_path_counts = counted_paths(provenance["masked_paths"], "masked path")
+readonly_path_counts = counted_paths(provenance["readonly_paths"], "readonly path")
+if any(count != 1 for count in readonly_path_counts.values()):
+    raise SystemExit("duplicate read-only path destination")
+masked_paths = set(masked_path_counts)
+readonly_paths = set(readonly_path_counts)
 expected_mounts = {}
 required_record_keys = {
     "access",
     "destination",
     "filesystem",
     "major_minor",
+    "mount_chain",
     "root",
     "source",
     "source_control",
 }
+string_record_keys = required_record_keys - {"mount_chain"}
 for record in provenance["mounts"]:
     if not isinstance(record, dict) or set(record) != required_record_keys:
         raise SystemExit("malformed mount provenance record")
     if any(
         not isinstance(record[key], str) or "\n" in record[key]
-        for key in required_record_keys
+        for key in string_record_keys
     ):
         raise SystemExit("non-string or newline-bearing mount provenance field")
     destination = record["destination"]
+    mount_chain = canonical_mount_chain(
+        record["mount_chain"], f"mount provenance record {destination!r}", True
+    )
+    mask_multiplicity = masked_path_counts.get(destination, 0)
+    if (
+        (mask_multiplicity > 1 or len(mount_chain) > 1)
+        and (
+            len(mount_chain) != mask_multiplicity
+            or not record["source_control"].startswith("oci-masked-")
+        )
+    ):
+        raise SystemExit(f"unsupported mount provenance stack: {destination!r}")
     if (
         not destination.startswith("/")
         or destination in expected_mounts
@@ -3241,59 +3298,131 @@ for destination, record in expected_mounts.items():
         raise SystemExit(f"unadmitted read-only destination: {destination!r}")
 
 def decode_mountinfo(value: str) -> str:
-    return re.sub(
+    decoded = re.sub(
         r"\\([0-7]{3})",
         lambda match: chr(int(match.group(1), 8)),
         value,
     )
+    if "\n" in decoded:
+        raise SystemExit("newline in mountinfo field")
+    return decoded
 
-observed_mounts = {}
-for line in Path("/proc/self/mountinfo").read_text().splitlines():
-    fields = line.split()
-    try:
-        separator = fields.index("-")
-    except ValueError as error:
-        raise SystemExit("mountinfo record has no separator") from error
-    if separator < 6 or len(fields) <= separator + 3:
-        raise SystemExit("mountinfo record is incomplete")
-    root = decode_mountinfo(fields[3])
-    mountpoint = decode_mountinfo(fields[4])
-    filesystem = fields[separator + 1]
-    source = decode_mountinfo(fields[separator + 2])
-    mount_options = set(fields[5].split(","))
-    if "ro" in mount_options:
-        access = "ro"
-    elif "rw" in mount_options:
-        access = "rw"
-    else:
-        raise SystemExit(f"mount has no access mode: {mountpoint!r}")
-    if mountpoint in observed_mounts:
-        raise SystemExit(f"stacked mount rejected: {mountpoint!r}")
-    observed_mounts[mountpoint] = {
-        "access": access,
-        "destination": mountpoint,
-        "filesystem": filesystem,
-        "major_minor": fields[2],
-        "root": root,
-        "source": source,
-    }
-
-if set(observed_mounts) != set(expected_mounts):
-    raise SystemExit(
-        "post-start mount set differs from pre-start provenance: "
-        f"missing={sorted(set(expected_mounts) - set(observed_mounts))!r} "
-        f"extra={sorted(set(observed_mounts) - set(expected_mounts))!r}"
-    )
-for destination, observed in observed_mounts.items():
-    expected = {
+def projected_mount(record: dict[str, object]) -> dict[str, object]:
+    return {
         key: value
-        for key, value in expected_mounts[destination].items()
-        if key != "source_control"
+        for key, value in record.items()
+        if key not in {"mount_chain", "mount_id", "parent_id"}
     }
-    if observed != expected:
-        raise SystemExit(
-            f"post-start mount source provenance changed: {destination!r}"
+
+def parse_mountinfo(
+    text: str, label: str, allow_stacks: bool = False
+) -> dict[str, dict[str, object]]:
+    raw_records = {}
+    mount_ids = set()
+    for line in text.splitlines():
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError as error:
+            raise SystemExit(f"{label} mountinfo record has no separator") from error
+        if separator < 6 or len(fields) <= separator + 3:
+            raise SystemExit(f"{label} mountinfo record is incomplete")
+        root = decode_mountinfo(fields[3])
+        destination = decode_mountinfo(fields[4])
+        source = decode_mountinfo(fields[separator + 2])
+        mount_id, parent_id = fields[:2]
+        if (
+            not root.startswith("/")
+            or not destination.startswith("/")
+            or not source
+            or not re.fullmatch(r"[1-9][0-9]*", mount_id)
+            or not re.fullmatch(r"[1-9][0-9]*", parent_id)
+            or mount_id in mount_ids
+        ):
+            raise SystemExit(f"{label} has an invalid mount: {destination!r}")
+        mount_ids.add(mount_id)
+        mount_options = set(fields[5].split(","))
+        if "ro" in mount_options and "rw" in mount_options:
+            raise SystemExit(f"{label} mount has conflicting access: {destination!r}")
+        if "ro" in mount_options:
+            access = "ro"
+        elif "rw" in mount_options:
+            access = "rw"
+        else:
+            raise SystemExit(f"{label} mount has no access mode: {destination!r}")
+        raw_records.setdefault(destination, []).append(
+            {
+                "access": access,
+                "destination": destination,
+                "filesystem": fields[separator + 1],
+                "major_minor": fields[2],
+                "mount_id": mount_id,
+                "parent_id": parent_id,
+                "root": root,
+                "source": source,
+            }
         )
+
+    records = {}
+    for destination, stack in raw_records.items():
+        chain = canonical_mount_chain(
+            [
+                {"mount_id": record["mount_id"], "parent_id": record["parent_id"]}
+                for record in stack
+            ],
+            f"{label} mount {destination!r}",
+        )
+        by_mount_id = {record["mount_id"]: record for record in stack}
+        ordered_stack = [by_mount_id[link["mount_id"]] for link in chain]
+        projection = projected_mount(ordered_stack[0])
+        if any(projected_mount(record) != projection for record in ordered_stack[1:]):
+            raise SystemExit(
+                f"{label} stacked mount provenance differs: {destination!r}"
+            )
+        if len(ordered_stack) > 1 and not allow_stacks:
+            raise SystemExit(f"{label} has a stacked mount: {destination!r}")
+        records[destination] = {**projection, "mount_chain": chain}
+    return records
+
+def validate_namespace_stacks(
+    records: dict[str, dict[str, object]],
+    masked_counts: Counter[str],
+    label: str,
+) -> None:
+    for destination, record in records.items():
+        observed = len(record["mount_chain"])
+        expected = masked_counts.get(destination, 0)
+        if (expected > 1 or observed > 1) and observed != expected:
+            raise SystemExit(f"{label} has an unsupported stack: {destination!r}")
+
+def compare_mount_provenance(
+    expected_mounts: dict[str, dict[str, object]],
+    observed_mounts: dict[str, dict[str, object]],
+) -> None:
+    if set(observed_mounts) != set(expected_mounts):
+        raise SystemExit(
+            "post-start mount set differs from pre-start provenance: "
+            f"missing={sorted(set(expected_mounts) - set(observed_mounts))!r} "
+            f"extra={sorted(set(observed_mounts) - set(expected_mounts))!r}"
+        )
+    for destination, observed in observed_mounts.items():
+        expected = {
+            key: value
+            for key, value in expected_mounts[destination].items()
+            if key != "source_control"
+        }
+        if observed != expected:
+            raise SystemExit(
+                f"post-start mount source provenance changed: {destination!r}"
+            )
+
+observed_mounts = parse_mountinfo(
+    Path("/proc/self/mountinfo").read_text(), "post-start container", True
+)
+validate_namespace_stacks(
+    observed_mounts, masked_path_counts, "post-start container"
+)
+compare_mount_provenance(expected_mounts, observed_mounts)
 
 provenance_sha256 = hashlib.sha256(
     (canonical_provenance + "\n").encode("utf-8")
@@ -3312,12 +3441,13 @@ print(
                 destination: {
                     "access": record["access"],
                     "filesystem": record["filesystem"],
+                    "multiplicity": len(record["mount_chain"]),
                     "source_control": record["source_control"],
                 }
                 for destination, record in sorted(expected_mounts.items())
                 if destination not in declared_host_binds and destination != "/"
             },
-            "schema": "io.nisavid.codiquary.container-mount-projection/v4",
+            "schema": "io.nisavid.codiquary.container-mount-projection/v5",
         },
         sort_keys=True,
     )
@@ -3867,8 +3997,58 @@ def decode_mountinfo(value: str) -> str:
         raise SystemExit("newline in mountinfo field")
     return decoded
 
-def parse_mountinfo(text: str, label: str) -> dict[str, dict[str, str]]:
-    records = {}
+def canonical_mount_chain(
+    value: object, label: str, require_order: bool = False
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise SystemExit(f"{label} has no mount chain")
+    links = []
+    mount_ids = set()
+    for link in value:
+        if (
+            not isinstance(link, dict)
+            or set(link) != {"mount_id", "parent_id"}
+            or any(
+                not isinstance(link[key], str)
+                or not re.fullmatch(r"[1-9][0-9]*", link[key])
+                for key in ("mount_id", "parent_id")
+            )
+            or link["mount_id"] in mount_ids
+        ):
+            raise SystemExit(f"{label} has an invalid mount chain")
+        mount_ids.add(link["mount_id"])
+        links.append(link)
+    roots = [link for link in links if link["parent_id"] not in mount_ids]
+    children = {}
+    for link in links:
+        if link["parent_id"] in mount_ids:
+            children.setdefault(link["parent_id"], []).append(link)
+    if len(roots) != 1 or any(len(group) != 1 for group in children.values()):
+        raise SystemExit(f"{label} has an ambiguous mount chain")
+    ordered = []
+    current = roots[0]
+    while current is not None:
+        ordered.append(current)
+        descendants = children.get(current["mount_id"], [])
+        current = descendants[0] if descendants else None
+    if len(ordered) != len(links):
+        raise SystemExit(f"{label} has an ambiguous mount chain")
+    if require_order and ordered != links:
+        raise SystemExit(f"{label} has a non-canonical mount chain")
+    return ordered
+
+def projected_mount(record: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in {"mount_chain", "mount_id", "parent_id"}
+    }
+
+def parse_mountinfo(
+    text: str, label: str, allow_stacks: bool = False
+) -> dict[str, dict[str, object]]:
+    raw_records = {}
+    mount_ids = set()
     for line in text.splitlines():
         fields = line.split()
         try:
@@ -3880,29 +4060,70 @@ def parse_mountinfo(text: str, label: str) -> dict[str, dict[str, str]]:
         root = decode_mountinfo(fields[3])
         destination = decode_mountinfo(fields[4])
         source = decode_mountinfo(fields[separator + 2])
+        mount_id, parent_id = fields[:2]
         if (
             not root.startswith("/")
             or not destination.startswith("/")
             or not source
-            or destination in records
+            or not re.fullmatch(r"[1-9][0-9]*", mount_id)
+            or not re.fullmatch(r"[1-9][0-9]*", parent_id)
+            or mount_id in mount_ids
         ):
-            raise SystemExit(f"{label} has an invalid or stacked mount: {destination!r}")
+            raise SystemExit(f"{label} has an invalid mount: {destination!r}")
+        mount_ids.add(mount_id)
         mount_options = set(fields[5].split(","))
+        if "ro" in mount_options and "rw" in mount_options:
+            raise SystemExit(f"{label} mount has conflicting access: {destination!r}")
         if "ro" in mount_options:
             access = "ro"
         elif "rw" in mount_options:
             access = "rw"
         else:
             raise SystemExit(f"{label} mount has no access mode: {destination!r}")
-        records[destination] = {
-            "access": access,
-            "destination": destination,
-            "filesystem": fields[separator + 1],
-            "major_minor": fields[2],
-            "root": root,
-            "source": source,
-        }
+        raw_records.setdefault(destination, []).append(
+            {
+                "access": access,
+                "destination": destination,
+                "filesystem": fields[separator + 1],
+                "major_minor": fields[2],
+                "mount_id": mount_id,
+                "parent_id": parent_id,
+                "root": root,
+                "source": source,
+            }
+        )
+
+    records = {}
+    for destination, stack in raw_records.items():
+        chain = canonical_mount_chain(
+            [
+                {"mount_id": record["mount_id"], "parent_id": record["parent_id"]}
+                for record in stack
+            ],
+            f"{label} mount {destination!r}",
+        )
+        by_mount_id = {record["mount_id"]: record for record in stack}
+        ordered_stack = [by_mount_id[link["mount_id"]] for link in chain]
+        projection = projected_mount(ordered_stack[0])
+        if any(projected_mount(record) != projection for record in ordered_stack[1:]):
+            raise SystemExit(
+                f"{label} stacked mount provenance differs: {destination!r}"
+            )
+        if len(ordered_stack) > 1 and not allow_stacks:
+            raise SystemExit(f"{label} has a stacked mount: {destination!r}")
+        records[destination] = {**projection, "mount_chain": chain}
     return records
+
+def validate_namespace_stacks(
+    records: dict[str, dict[str, object]],
+    masked_counts: Counter[str],
+    label: str,
+) -> None:
+    for destination, record in records.items():
+        observed = len(record["mount_chain"])
+        expected = masked_counts.get(destination, 0)
+        if (expected > 1 or observed > 1) and observed != expected:
+            raise SystemExit(f"{label} has an unsupported stack: {destination!r}")
 
 process_root = Path("/proc") / str(container_pid)
 
@@ -3921,7 +4142,12 @@ process_identity_after = process_identity()
 if process_identity_after != process_identity_before:
     raise SystemExit("initialized container process changed during mount observation")
 
-target_mounts = parse_mountinfo(target_mountinfo, "initialized container")
+target_mounts = parse_mountinfo(
+    target_mountinfo, "initialized container", True
+)
+validate_namespace_stacks(
+    target_mounts, masked_path_counts, "initialized container"
+)
 host_mounts = parse_mountinfo(
     Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
     "controller host",
@@ -3960,11 +4186,16 @@ provenance_records = {}
 
 def admit_exact(
     destination: str,
-    expected: dict[str, str],
+    expected: dict[str, object],
     source_control: str,
+    expected_multiplicity: int = 1,
 ) -> None:
     observed = remaining_mounts.pop(destination, None)
-    if observed != expected:
+    if (
+        observed is None
+        or projected_mount(observed) != projected_mount(expected)
+        or len(observed["mount_chain"]) != expected_multiplicity
+    ):
         raise SystemExit(f"initialized mount provenance mismatch: {destination!r}")
     provenance_records[destination] = {
         **observed,
@@ -4125,14 +4356,17 @@ for destination in sorted(masked_paths):
         and observed["source"] == dev_mount["source"]
         and observed["access"] == "ro"
     )
-    host_dev_null_mask = observed == {
+    expected_multiplicity = masked_path_counts[destination]
+    if len(observed["mount_chain"]) != expected_multiplicity:
+        raise SystemExit(f"masked mount multiplicity changed: {destination!r}")
+    host_dev_null_mask = projected_mount(observed) == {
         "access": "ro",
         "destination": destination,
         **host_dev_null_projection,
     }
     crun_empty_mask = (
         crun_empty_projection is not None
-        and observed
+        and projected_mount(observed)
         == {
             "access": "ro",
             "destination": destination,
@@ -4156,7 +4390,9 @@ for destination in sorted(masked_paths):
         source_control = "oci-masked-tmpfs"
     else:
         raise SystemExit(f"masked mount source changed: {destination!r}")
-    admit_exact(destination, observed, source_control)
+    admit_exact(
+        destination, observed, source_control, expected_multiplicity
+    )
 
 if remaining_mounts:
     raise SystemExit(
@@ -4176,8 +4412,8 @@ output_path.write_text(
             ),
             "oci_config_path": str(resolved_oci_config_path),
             "oci_config_sha256": spec_sha256,
-            "masked_paths": sorted(masked_paths),
-            "readonly_paths": sorted(readonly_paths),
+            "masked_paths": sorted(masked_path_counts.elements()),
+            "readonly_paths": sorted(readonly_path_counts.elements()),
             "root_source": str(root_source),
             "runtime_pseudo_filesystems": sorted(
                 runtime_pseudo_filesystems,
@@ -4186,7 +4422,7 @@ output_path.write_text(
             "runtime_state_binds": sorted(
                 runtime_state_binds, key=lambda record: record["destination"]
             ),
-            "schema": "io.nisavid.codiquary.effective-mount-admission/v2",
+            "schema": "io.nisavid.codiquary.effective-mount-admission/v3",
         },
         indent=2,
         sort_keys=True,
@@ -4196,12 +4432,12 @@ output_path.write_text(
 )
 provenance = {
     "container_id": container_id,
-    "masked_paths": sorted(masked_paths),
+    "masked_paths": sorted(masked_path_counts.elements()),
     "mounts": sorted(
         provenance_records.values(), key=lambda record: record["destination"]
     ),
-    "readonly_paths": sorted(readonly_paths),
-    "schema": "io.nisavid.codiquary.pre-start-mount-provenance/v1",
+    "readonly_paths": sorted(readonly_path_counts.elements()),
+    "schema": "io.nisavid.codiquary.pre-start-mount-provenance/v2",
 }
 with provenance_path.open("x", encoding="utf-8") as output:
     output.write(json.dumps(provenance, separators=(",", ":"), sort_keys=True) + "\n")
@@ -4383,7 +4619,7 @@ for line in preflight_path.read_text(encoding="utf-8").splitlines():
     if (
         isinstance(candidate, dict)
         and candidate.get("schema")
-        == "io.nisavid.codiquary.container-mount-projection/v4"
+        == "io.nisavid.codiquary.container-mount-projection/v5"
     ):
         projections.append(candidate)
 if len(projections) != 1:
