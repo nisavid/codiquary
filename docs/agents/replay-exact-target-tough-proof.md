@@ -2737,11 +2737,16 @@ the exact admitted source through the host mount table and requires the same
 mountinfo device, root, source, filesystem, and access. The reviewed image and
 task-owned Podman state control the image root; coordinator-selected paths
 control declared binds; the closed Podman root and runroot control task-state
-binds. Runtime pseudo-filesystems are accepted only at exact destinations in
-the admitted OCI mount list. Security submounts are accepted only when the
-specification's complete `maskedPaths` and `readonlyPaths` sets equal the
+binds. Runtime pseudo-filesystems are accepted only at exact destinations and
+access modes in the admitted OCI mount list. For this fixed read-only
+configuration, `/dev` must be a read-only tmpfs, while `/dev/shm` must be the
+read-only task-state bind with exactly the option multiplicities emitted by
+[Podman's two read-only bind branches](https://github.com/containers/podman/blob/v6.1.0/libpod/container_internal_common.go#L454-L459).
+Security submounts are accepted only when the specification's complete
+`maskedPaths` and `readonlyPaths` multiplicities equal the
 [Podman 6.1.0 generator](https://github.com/containers/podman/blob/v6.1.0/pkg/specgen/generate/config_linux.go#L99-L126)
-defaults from [`go.podman.io/common` 0.69.1](https://github.com/podman-container-tools/container-libs/blob/common/v0.69.1/common/pkg/config/default.go#L38-L86),
+defaults from [`go.podman.io/common` 0.69.1](https://github.com/podman-container-tools/container-libs/blob/common/v0.69.1/common/pkg/config/default.go#L38-L86)
+plus [Podman's tagged powercap hardening pass](https://github.com/containers/podman/blob/v6.1.0/libpod/container_internal_linux.go#L708-L712),
 including only the kernel-owned thermal-throttle paths matched by that tagged
 implementation. Each observed security submount must then occupy one of those
 exact destinations with a source equivalent to the kernel `/dev/null` selected
@@ -3117,7 +3122,6 @@ runtime_pseudo_destinations = {
     "/dev",
     "/dev/mqueue",
     "/dev/pts",
-    "/dev/shm",
     "/proc",
     "/sys",
     "/sys/fs/cgroup",
@@ -3519,6 +3523,7 @@ PY_DECLARED_MOUNTS
     "$phase_fixtures" /phase/fixtures rw \
     "$phase_work" /repo/proofs/exact-target-tough/.work rw \
     <<'PY_EFFECTIVE_MOUNTS' || return 125
+from collections import Counter
 import glob
 import hashlib
 import json
@@ -3615,20 +3620,42 @@ def access_from(options: set[str]) -> str:
         raise SystemExit("OCI mount declares both ro and rw")
     return "ro" if "ro" in options else "rw"
 
+def mount_options(
+    destination: str, mount_type: object, raw_options: object
+) -> set[str]:
+    if (
+        not isinstance(raw_options, list)
+        or any(not isinstance(option, str) for option in raw_options)
+    ):
+        raise SystemExit(f"malformed effective OCI mount: {destination!r}")
+    option_counts = Counter(raw_options)
+    if destination == "/dev/shm" and mount_type == "bind":
+        expected_option_counts = Counter(
+            {
+                "bind": 1,
+                "nodev": 2,
+                "noexec": 2,
+                "nosuid": 2,
+                "ro": 1,
+                "rprivate": 1,
+            }
+        )
+        if option_counts != expected_option_counts:
+            raise SystemExit(f"malformed effective OCI mount: {destination!r}")
+    elif any(count != 1 for count in option_counts.values()):
+        raise SystemExit(f"malformed effective OCI mount: {destination!r}")
+    return set(option_counts)
+
 runtime_state_policy = {
-    "/dev/shm": ("directory", {"rw"}),
+    "/dev/shm": ("directory", {"ro"}),
     "/etc/hostname": ("file", {"ro", "rw"}),
     "/etc/resolv.conf": ("file", {"ro", "rw"}),
     "/run/.containerenv": ("file", {"ro", "rw"}),
 }
 runtime_pseudo_policy = {
-    "/dev": {("tmpfs", "tmpfs", "rw")},
+    "/dev": {("tmpfs", "tmpfs", "ro")},
     "/dev/mqueue": {("mqueue", "mqueue", "rw")},
     "/dev/pts": {("devpts", "devpts", "rw")},
-    "/dev/shm": {
-        ("tmpfs", "shm", "rw"),
-        ("tmpfs", "tmpfs", "rw"),
-    },
     "/proc": {("proc", "proc", "rw")},
     "/sys": {("sysfs", "sysfs", "ro")},
     "/sys/fs/cgroup": {
@@ -3680,17 +3707,15 @@ linux_config = spec.get("linux")
 if not isinstance(linux_config, dict):
     raise SystemExit("effective OCI specification has no Linux policy")
 
-def security_paths(field: str) -> set[str]:
+def security_paths(field: str) -> list[str]:
     raw_paths = linux_config.get(field)
     if not isinstance(raw_paths, list):
         raise SystemExit(f"effective OCI specification has no {field}")
     paths = [container_path(value) for value in raw_paths]
-    if len(set(paths)) != len(paths):
-        raise SystemExit(f"effective OCI specification repeats {field}")
     for path in paths:
         if not any(path.startswith(root + "/") for root in ("/proc", "/sys")):
             raise SystemExit(f"{field} escaped the runtime security trees: {path!r}")
-    return set(paths)
+    return paths
 
 expected_masked_paths = {
     "/proc/acpi",
@@ -3713,6 +3738,8 @@ thermal_throttle_paths = {
     )
 }
 expected_masked_paths.update(thermal_throttle_paths)
+expected_masked_path_counts = Counter(expected_masked_paths)
+expected_masked_path_counts["/sys/devices/virtual/powercap"] += 1
 expected_readonly_paths = {
     "/proc/asound",
     "/proc/bus",
@@ -3721,21 +3748,24 @@ expected_readonly_paths = {
     "/proc/sys",
     "/proc/sysrq-trigger",
 }
+expected_readonly_path_counts = Counter(expected_readonly_paths)
 
-masked_paths = security_paths("maskedPaths")
-readonly_paths = security_paths("readonlyPaths")
-if masked_paths != expected_masked_paths:
+masked_path_counts = Counter(security_paths("maskedPaths"))
+readonly_path_counts = Counter(security_paths("readonlyPaths"))
+if masked_path_counts != expected_masked_path_counts:
     raise SystemExit(
         "effective OCI maskedPaths differ from the tagged Podman defaults: "
-        f"missing={sorted(expected_masked_paths - masked_paths)!r} "
-        f"extra={sorted(masked_paths - expected_masked_paths)!r}"
+        f"missing={sorted((expected_masked_path_counts - masked_path_counts).elements())!r} "
+        f"extra={sorted((masked_path_counts - expected_masked_path_counts).elements())!r}"
     )
-if readonly_paths != expected_readonly_paths:
+if readonly_path_counts != expected_readonly_path_counts:
     raise SystemExit(
         "effective OCI readonlyPaths differ from the tagged Podman defaults: "
-        f"missing={sorted(expected_readonly_paths - readonly_paths)!r} "
-        f"extra={sorted(readonly_paths - expected_readonly_paths)!r}"
+        f"missing={sorted((expected_readonly_path_counts - readonly_path_counts).elements())!r} "
+        f"extra={sorted((readonly_path_counts - expected_readonly_path_counts).elements())!r}"
     )
+masked_paths = set(masked_path_counts)
+readonly_paths = set(readonly_path_counts)
 if masked_paths & readonly_paths:
     raise SystemExit("effective OCI mask and read-only paths overlap")
 
@@ -3757,18 +3787,15 @@ for mount in mounts:
         not isinstance(mount_type, str)
         or not isinstance(source, str)
         or "\n" in source
-        or not isinstance(raw_options, list)
-        or any(not isinstance(option, str) for option in raw_options)
-        or len(set(raw_options)) != len(raw_options)
     ):
         raise SystemExit(f"malformed effective OCI mount: {destination!r}")
-    options = set(raw_options)
+    options = mount_options(destination, mount_type, raw_options)
     access = access_from(options)
     is_bind = mount_type == "bind" or bool({"bind", "rbind"} & options)
     record = {
         "access": access,
         "destination": destination,
-        "options": sorted(options),
+        "options": sorted(raw_options),
         "source": source,
         "type": mount_type,
     }
@@ -3970,13 +3997,9 @@ for record in runtime_state_binds:
     )
 
 post_start_pseudo_policy = {
-    "/dev": {("tmpfs", "tmpfs", "/", "rw")},
+    "/dev": {("tmpfs", "tmpfs", "/", "ro")},
     "/dev/mqueue": {("mqueue", "mqueue", "/", "rw")},
     "/dev/pts": {("devpts", "devpts", "/", "rw")},
-    "/dev/shm": {
-        ("tmpfs", "shm", "/", "rw"),
-        ("tmpfs", "tmpfs", "/", "rw"),
-    },
     "/proc": {("proc", "proc", "/", "rw")},
     "/sys": {("sysfs", "sysfs", "/", "ro")},
     "/sys/fs/cgroup": {
