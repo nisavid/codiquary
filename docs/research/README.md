@@ -10,6 +10,10 @@ note is the original report, including its source links and evidence limits.
 | [TUF 1.0.36 conformance and security delta](CRYPTO_RELEASE_OPS_TUF_CONFORMANCE.md) | 2026-09-07 | [Establish the release trust TUF conformance delta](https://github.com/nisavid/dotfiles/pull/275) |
 | [Rust and post-quantum TUF feasibility](CRYPTO_RELEASE_OPS_TUF_PQ_FEASIBILITY.md) | 2026-09-08 | [Evaluate Rust post-quantum TUF integration](https://github.com/nisavid/dotfiles/pull/277) |
 
+The [TUF 1.0.36 optional mirrors clarification](TUF_1_0_36_MIRRORS_ERRATUM.md)
+corrects the conformance report's repository-surface inventory and records its
+effect on current Codiquary work without changing the retained source.
+
 ## Later decisions and evidence
 
 The [conditional TUF adoption decision](https://github.com/nisavid/codiquary/issues/18#issuecomment-5624996832)
