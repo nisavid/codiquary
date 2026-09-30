@@ -544,6 +544,112 @@ cq_oci_controller() {
       || return 125
   fi
 
+  local controller_stdin_fifo=
+  local controller_stdin_expected=
+  local controller_stdin_expected_sha256=
+  local controller_stdin_observed=
+  local controller_stdin_fifo_identity=
+  local controller_stdin_validator=
+  local controller_stdin_validator_sha256=
+  if [[ ${1:-} = --controller-stdin-stream ]]; then
+    test "$#" -ge 6 || return 125
+    test -z "$controller_stdin" || return 125
+    controller_stdin_fifo=$2
+    controller_stdin_expected=$3
+    controller_stdin_expected_sha256=$4
+    controller_stdin_observed=$5
+    shift 5 || return 125
+    for stream_path in \
+      "$controller_stdin_fifo" "$controller_stdin_expected" \
+      "$controller_stdin_observed"; do
+      [[ "$stream_path" = /* && "$stream_path" != *$'\n'* ]] || return 125
+    done
+    [[ "$controller_stdin_expected_sha256" =~ ^[0-9a-f]{64}$ ]] \
+      || return 125
+    test -p "$controller_stdin_fifo" && test ! -L "$controller_stdin_fifo" \
+      || return 125
+    test -f "$controller_stdin_expected" \
+      && test ! -L "$controller_stdin_expected" || return 125
+    test ! -e "$controller_stdin_observed" || return 125
+    test "$(/usr/bin/stat -c '%a' "$controller_stdin_fifo")" = 600 \
+      || return 125
+    test "$(/usr/bin/stat -c '%u' "$controller_stdin_fifo")" \
+      -eq "$(/usr/bin/id -u)" || return 125
+    controller_stdin_fifo_identity=$(
+      /usr/bin/stat -c '%d:%i' "$controller_stdin_fifo"
+    ) || return 125
+    controller_stdin_validator="$receipt_dir/.stdin-validator.py"
+    test ! -e "$controller_stdin_validator" || return 125
+    /usr/bin/tee "$controller_stdin_validator" >/dev/null \
+      <<'PY_CONTROLLER_STDIN' || return 125
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+
+if len(sys.argv) != 3:
+    raise SystemExit("usage: stdin-validator.py EXPECTED OBSERVED")
+expected_path = Path(sys.argv[1])
+observed_path = Path(sys.argv[2])
+expected = expected_path.read_bytes()
+separator = expected.find(b"\n")
+if separator < 0 or separator + 1 > 1024 * 1024:
+    raise SystemExit("expected mount provenance record is malformed")
+expected_prefix = expected[: separator + 1]
+expected_tail = expected[separator + 1 :]
+if (
+    not expected_tail.startswith(b"CODIQUARY_RELEASE_V1\n")
+    or len(expected_tail) > 4 * 1024 * 1024 + len(b"CODIQUARY_RELEASE_V1\n")
+):
+    raise SystemExit("expected release stream is malformed")
+
+
+def read_prefix() -> bytes:
+    record = bytearray()
+    while True:
+        byte = os.read(0, 1)
+        if not byte:
+            raise SystemExit("staged stream ended before mount provenance")
+        record.extend(byte)
+        if byte == b"\n":
+            return bytes(record)
+        if len(record) > len(expected_prefix):
+            raise SystemExit("staged mount provenance differs from expectation")
+
+
+def write_all(descriptor: int, value: bytes) -> None:
+    remaining = memoryview(value)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise SystemExit("staged stream forwarding failed")
+        remaining = remaining[written:]
+
+
+actual_prefix = read_prefix()
+with observed_path.open("xb", buffering=0) as observed:
+    observed.write(actual_prefix)
+    if actual_prefix != expected_prefix:
+        raise SystemExit("staged mount provenance differs from expectation")
+    write_all(1, actual_prefix)
+    actual_tail = sys.stdin.buffer.read(len(expected_tail) + 1)
+    observed.write(actual_tail)
+    if actual_tail != expected_tail:
+        raise SystemExit("staged release stream differs from expectation")
+    write_all(1, actual_tail)
+PY_CONTROLLER_STDIN
+    chmod 500 "$controller_stdin_validator" || return 125
+    controller_stdin_validator_sha256=$(
+      /usr/bin/sha256sum "$controller_stdin_validator"
+    ) || return 125
+    controller_stdin_validator_sha256=${controller_stdin_validator_sha256%% *}
+    [[ "$controller_stdin_validator_sha256" =~ ^[0-9a-f]{64}$ ]] \
+      || return 125
+  fi
+
   printf '%q ' "${podman_environment[@]}" "${podman_command[@]}" version \
     > "$receipt_dir/version-argv.txt" || return 125
   printf '\n' >> "$receipt_dir/version-argv.txt" || return 125
@@ -561,6 +667,11 @@ cq_oci_controller() {
     fi
     if [[ -n "$controller_stdin" ]]; then
       printf '%s  %s\n' "$controller_stdin_sha256" "$controller_stdin"
+    fi
+    if [[ -n "$controller_stdin_fifo" ]]; then
+      printf '%s  %s\n' \
+        "$controller_stdin_expected_sha256" "$controller_stdin_expected" \
+        "$controller_stdin_validator_sha256" "$controller_stdin_validator"
     fi
   } \
     | /usr/bin/sha256sum -c - > "$receipt_dir/controller.sha256" \
@@ -581,7 +692,19 @@ cq_oci_controller() {
   printf '\n' >> "$receipt_dir/argv.txt" || return 125
 
   local status
-  if [[ -n "$controller_stdin" ]]; then
+  if [[ -n "$controller_stdin_fifo" ]]; then
+    if (
+      set -o pipefail
+      /usr/bin/python3 "$controller_stdin_validator" \
+        "$controller_stdin_expected" "$controller_stdin_observed" \
+        < "$controller_stdin_fifo" \
+        | "${podman_environment[@]}" "${podman_command[@]}" "$@"
+    ); then
+      status=0
+    else
+      status=$?
+    fi
+  elif [[ -n "$controller_stdin" ]]; then
     if "${podman_environment[@]}" "${podman_command[@]}" "$@" \
       < "$controller_stdin"; then
       status=0
@@ -600,6 +723,16 @@ cq_oci_controller() {
   unexpected_hooks=$(/usr/bin/find "$hooks_dir" -mindepth 1 -print -quit) \
     || return 125
   test -z "$unexpected_hooks" || return 125
+  if [[ -n "$controller_stdin_fifo" ]]; then
+    test -p "$controller_stdin_fifo" && test ! -L "$controller_stdin_fifo" \
+      || return 125
+    test "$(/usr/bin/stat -c '%d:%i' "$controller_stdin_fifo")" \
+      = "$controller_stdin_fifo_identity" || return 125
+    test -f "$controller_stdin_observed" \
+      && test ! -L "$controller_stdin_observed" || return 125
+    /usr/bin/cmp --silent \
+      "$controller_stdin_expected" "$controller_stdin_observed" || return 125
+  fi
   {
     printf '%s  %s\n' \
       "$CQ_PODMAN_SHA256" /usr/bin/podman \
@@ -614,9 +747,18 @@ cq_oci_controller() {
     if [[ -n "$controller_stdin" ]]; then
       printf '%s  %s\n' "$controller_stdin_sha256" "$controller_stdin"
     fi
+    if [[ -n "$controller_stdin_fifo" ]]; then
+      printf '%s  %s\n' \
+        "$controller_stdin_expected_sha256" "$controller_stdin_expected" \
+        "$controller_stdin_expected_sha256" "$controller_stdin_observed" \
+        "$controller_stdin_validator_sha256" "$controller_stdin_validator"
+    fi
   } \
     | /usr/bin/sha256sum -c - >> "$receipt_dir/controller.sha256" \
     || return 125
+  if [[ -n "$controller_stdin_validator" ]]; then
+    /usr/bin/rm "$controller_stdin_validator" || return 125
+  fi
   printf '%s\n' "$status" > "$receipt_dir/status.txt" || return 125
   local receipt_tmp receipt_tmp_name
   receipt_tmp=$(/usr/bin/mktemp "$receipt_dir/.receipt.sha256.XXXXXX") \
@@ -3109,6 +3251,7 @@ PY_IMAGE
     "AWS_LC_SYS_USE_SYSTEM=0"
     /bin/bash -c '
       set -euo pipefail
+      trap '\''printf "%s\\n" CODIQUARY_EXECUTOR_PREFLIGHT_FAILED'\'' ERR
       printf "%s\n" CODIQUARY_EXECUTOR_PREFLIGHT_V1
       test -f /opt/codiquary/lib/libclang.so
       test "$(readlink -f /opt/codiquary/lib/libclang.so)" = \
@@ -3263,6 +3406,7 @@ source_controls = {
     "oci-pseudo-filesystem",
     "oci-readonly-remount",
     "reviewed-image-root",
+    "task-conmon-shm-bind",
     "task-state-bind",
 }
 
@@ -3470,6 +3614,8 @@ for destination, record in expected_mounts.items():
     control = record["source_control"]
     if control == "reviewed-image-root" and destination != "/":
         raise SystemExit(f"unexpected image-root destination: {destination!r}")
+    if control == "task-conmon-shm-bind" and destination != "/dev/shm":
+        raise SystemExit(f"unexpected monitor-bound destination: {destination!r}")
     if control == "task-state-bind" and destination not in runtime_state_destinations:
         raise SystemExit(f"unallowlisted task-state bind: {destination!r}")
     if control == "oci-pseudo-filesystem" and destination not in runtime_pseudo_destinations:
@@ -3480,6 +3626,9 @@ for destination, record in expected_mounts.items():
         raise SystemExit(f"unadmitted masked destination: {destination!r}")
     if control == "oci-readonly-remount" and destination not in readonly_paths:
         raise SystemExit(f"unadmitted read-only destination: {destination!r}")
+if expected_mounts.get("/dev/shm", {}).get("source_control") \
+    != "task-conmon-shm-bind":
+    raise SystemExit("shared-memory provenance lacks monitor source binding")
 
 def decode_mountinfo(value: str) -> str:
     decoded = re.sub(
@@ -3676,6 +3825,8 @@ for family, address, label in probes:
         sock.close()
 PY_NETWORK
       printf "%s\n" CODIQUARY_EXECUTOR_PREFLIGHT_COMPLETE
+      IFS= read -r release_record
+      test "$release_record" = CODIQUARY_RELEASE_V1
       exec "$@" > /phase/output/stdout.txt 2> /phase/output/stderr.txt
     ' cq-phase "$@"
   )
@@ -3837,10 +3988,503 @@ PY_DECLARED_MOUNTS
     "$initialized_inspect_controller_status" || return 125
   test "$initialized_inspect_controller_status" -eq 0 || return 125
 
+  local shm_binding_observer="$phase_boundary/shm-source-binding-observer.py"
+  test ! -e "$shm_binding_observer" || return 125
+  /usr/bin/tee "$shm_binding_observer" >/dev/null <<'PY_SHM_SOURCE_BINDING' \
+    || return 125
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from collections import Counter
+import ctypes
+import errno
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import sys
+
+SCHEMA = "io.nisavid.codiquary.conmon-shm-source-binding/v2"
+REQUIRED_STATX_MASK = 0x1101
+AT_FDCWD = -100
+AT_SYMLINK_NOFOLLOW = 0x100
+AT_NO_AUTOMOUNT = 0x800
+SHM_OPTIONS = Counter(
+    {
+        "bind": 1,
+        "nodev": 2,
+        "noexec": 2,
+        "nosuid": 2,
+        "ro": 1,
+        "rprivate": 1,
+    }
+)
+
+
+class StatxTimestamp(ctypes.Structure):
+    _fields_ = [
+        ("tv_sec", ctypes.c_int64),
+        ("tv_nsec", ctypes.c_uint32),
+        ("reserved", ctypes.c_int32),
+    ]
+
+
+class Statx(ctypes.Structure):
+    _fields_ = [
+        ("stx_mask", ctypes.c_uint32),
+        ("stx_blksize", ctypes.c_uint32),
+        ("stx_attributes", ctypes.c_uint64),
+        ("stx_nlink", ctypes.c_uint32),
+        ("stx_uid", ctypes.c_uint32),
+        ("stx_gid", ctypes.c_uint32),
+        ("stx_mode", ctypes.c_uint16),
+        ("spare0", ctypes.c_uint16),
+        ("stx_ino", ctypes.c_uint64),
+        ("stx_size", ctypes.c_uint64),
+        ("stx_blocks", ctypes.c_uint64),
+        ("stx_attributes_mask", ctypes.c_uint64),
+        ("stx_atime", StatxTimestamp),
+        ("stx_btime", StatxTimestamp),
+        ("stx_ctime", StatxTimestamp),
+        ("stx_mtime", StatxTimestamp),
+        ("stx_rdev_major", ctypes.c_uint32),
+        ("stx_rdev_minor", ctypes.c_uint32),
+        ("stx_dev_major", ctypes.c_uint32),
+        ("stx_dev_minor", ctypes.c_uint32),
+        ("stx_mnt_id", ctypes.c_uint64),
+        ("stx_dio_mem_align", ctypes.c_uint32),
+        ("stx_dio_offset_align", ctypes.c_uint32),
+        ("spare3", ctypes.c_uint64 * 12),
+    ]
+
+
+def fail(message: str) -> None:
+    raise SystemExit(message)
+
+
+def decode_mountinfo(value: str) -> str:
+    decoded = re.sub(
+        r"\\([0-7]{3})",
+        lambda match: chr(int(match.group(1), 8)),
+        value,
+    )
+    if "\n" in decoded:
+        fail("newline in source-binding mountinfo field")
+    return decoded
+
+
+def parse_mountinfo(text: str, label: str) -> list[dict[str, str]]:
+    records = []
+    mount_ids = set()
+    for line in text.splitlines():
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError as error:
+            raise SystemExit(f"{label} mountinfo record has no separator") from error
+        if separator < 6 or len(fields) <= separator + 3:
+            fail(f"{label} mountinfo record is incomplete")
+        mount_id, parent_id = fields[:2]
+        root = decode_mountinfo(fields[3])
+        destination = decode_mountinfo(fields[4])
+        source = decode_mountinfo(fields[separator + 2])
+        if (
+            not re.fullmatch(r"[1-9][0-9]*", mount_id)
+            or not re.fullmatch(r"[1-9][0-9]*", parent_id)
+            or mount_id in mount_ids
+            or not root.startswith("/")
+            or not destination.startswith("/")
+            or not source
+            or not re.fullmatch(r"[0-9]+:[0-9]+", fields[2])
+        ):
+            fail(f"{label} has an invalid mount: {destination!r}")
+        mount_ids.add(mount_id)
+        options = set(fields[5].split(","))
+        if "ro" in options and "rw" in options:
+            fail(f"{label} mount has conflicting access: {destination!r}")
+        if "ro" in options:
+            access = "ro"
+        elif "rw" in options:
+            access = "rw"
+        else:
+            fail(f"{label} mount has no access mode: {destination!r}")
+        records.append(
+            {
+                "access": access,
+                "destination": destination,
+                "filesystem": fields[separator + 1],
+                "major_minor": fields[2],
+                "mount_id": mount_id,
+                "parent_id": parent_id,
+                "root": root,
+                "source": source,
+            }
+        )
+    return records
+
+
+def process_identity(proc_root: Path, pid: int, label: str) -> dict[str, object]:
+    process_root = proc_root / str(pid)
+    process_stat = process_root.stat()
+    raw_stat = (process_root / "stat").read_text(encoding="ascii")
+    close_paren = raw_stat.rfind(")")
+    remaining = raw_stat[close_paren + 2 :].split() if close_paren >= 0 else []
+    if len(remaining) <= 19 or not remaining[19].isdigit() or remaining[19] == "0":
+        fail(f"{label} process stat is incomplete")
+    namespace_proc_names = {
+        "user": "user",
+        "mnt": "mnt",
+        "ipc": "ipc",
+        "pid": "pid",
+        "net": "net",
+        "uts": "uts",
+        "cgroup": "cgroup",
+    }
+    namespaces = {}
+    for name, proc_name in namespace_proc_names.items():
+        identity = os.readlink(process_root / "ns" / proc_name)
+        if not re.fullmatch(rf"{re.escape(proc_name)}:\[[1-9][0-9]*\]", identity):
+            fail(f"{label} process has an invalid {name} namespace identity")
+        namespaces[name] = identity
+    return {
+        "namespaces": namespaces,
+        "pid": pid,
+        "proc_inode": process_stat.st_ino,
+        "starttime_ticks": remaining[19],
+    }
+
+
+def symlink_free_beneath(root: Path, absolute_path: Path, label: str) -> Path:
+    if not absolute_path.is_absolute() or ".." in absolute_path.parts:
+        fail(f"{label} is not an absolute canonical path")
+    current = root
+    for component in PurePosixPath(absolute_path.as_posix()).parts[1:]:
+        current = current / component
+        try:
+            mode = current.lstat().st_mode
+        except OSError as error:
+            raise SystemExit(f"{label} component is inaccessible") from error
+        if stat.S_ISLNK(mode):
+            fail(f"{label} traverses a symlink")
+    return current
+
+
+def read_statx(path: Path, label: str) -> dict[str, object]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        call = libc.statx
+    except AttributeError as error:
+        raise SystemExit("statx is unavailable") from error
+    call.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(Statx),
+    ]
+    call.restype = ctypes.c_int
+    result = Statx()
+    encoded = os.fsencode(path)
+    if call(
+        AT_FDCWD,
+        encoded,
+        AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+        REQUIRED_STATX_MASK,
+        ctypes.byref(result),
+    ) != 0:
+        error_number = ctypes.get_errno()
+        raise SystemExit(f"{label} statx failed: {errno.errorcode.get(error_number, error_number)}")
+    observed = {
+        "device_major": int(result.stx_dev_major),
+        "device_minor": int(result.stx_dev_minor),
+        "inode": int(result.stx_ino),
+        "mask": int(result.stx_mask),
+        "mode": int(result.stx_mode),
+        "mount_id": int(result.stx_mnt_id),
+        "type": "directory" if stat.S_ISDIR(result.stx_mode) else "other",
+    }
+    return observed
+
+
+def statx_identity(path: Path, label: str) -> dict[str, object]:
+    observed = read_statx(path, label)
+    if observed["mask"] & REQUIRED_STATX_MASK != REQUIRED_STATX_MASK:
+        fail(f"{label} statx mask omits required fields")
+    if (
+        observed["type"] != "directory"
+        or observed["mode"] & 0o170000 != 0o040000
+        or observed["inode"] <= 0
+        or observed["mount_id"] <= 0
+    ):
+        fail(f"{label} statx identity is not a mounted directory")
+    return observed
+
+
+def validate_previous(current: dict[str, object], previous_path: Path) -> None:
+    previous = json.loads(previous_path.read_text(encoding="utf-8"))
+    if not isinstance(previous, dict) or previous.get("schema") != SCHEMA:
+        fail("pre-start shared-memory observation is malformed")
+    if previous.get("phase") != "pre-start":
+        fail("pre-start shared-memory observation has the wrong phase")
+    stable_fields = set(current) - {"phase"}
+    if set(previous) != set(current) or any(
+        previous[field] != current[field] for field in stable_fields
+    ):
+        fail("post-start shared-memory provenance changed")
+
+
+if len(sys.argv) != 8:
+    fail(
+        "usage: shm-source-binding-observer.py PHASE INSPECTION RETAINED-OCI "
+        "OUTPUT EXECUTION-STATE CONTAINER-ID PREVIOUS-OR-DASH"
+    )
+phase = sys.argv[1]
+inspection_path = Path(sys.argv[2])
+retained_oci_path = Path(sys.argv[3])
+output_path = Path(sys.argv[4])
+execution_state_argument = Path(sys.argv[5])
+container_id = sys.argv[6]
+previous_argument = sys.argv[7]
+if phase not in {"pre-start", "post-start-gate"}:
+    fail("shared-memory observation phase changed")
+if (phase == "pre-start") != (previous_argument == "-"):
+    fail("shared-memory observation phase is out of order")
+if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+    fail("shared-memory observation container ID is invalid")
+execution_state = execution_state_argument.resolve(strict=True)
+if execution_state != execution_state_argument or execution_state.is_symlink():
+    fail("execution state is symlink-confused")
+
+inspection = json.loads(inspection_path.read_text(encoding="utf-8"))
+if len(inspection) != 1 or inspection[0].get("Id") != container_id:
+    fail("source observation is not bound to the initialized container")
+container = inspection[0]
+if container.get("GraphDriver", {}).get("Name") != "vfs":
+    fail("source observation storage driver changed")
+state = container.get("State")
+if not isinstance(state, dict):
+    fail("source observation has no container state")
+container_pid = state.get("Pid")
+monitor_pid = state.get("ConmonPid")
+if (
+    type(container_pid) is not int
+    or container_pid <= 0
+    or type(monitor_pid) is not int
+    or monitor_pid <= 0
+    or monitor_pid == container_pid
+):
+    fail("source observation has invalid process PIDs")
+
+expected_userdata = (
+    execution_state / "root" / "vfs-containers" / container_id / "userdata"
+)
+expected_oci_path = expected_userdata / "config.json"
+raw_oci_path = container.get("OCIConfigPath")
+if raw_oci_path != str(expected_oci_path):
+    fail("effective OCI path is not bound to the exact container")
+if expected_oci_path.resolve(strict=True) != expected_oci_path:
+    fail("effective OCI path traverses a symlink")
+oci_bytes = expected_oci_path.read_bytes()
+if phase == "pre-start":
+    with retained_oci_path.open("xb") as output:
+        output.write(oci_bytes)
+else:
+    if oci_bytes != retained_oci_path.read_bytes():
+        fail("effective OCI bytes changed")
+spec = json.loads(oci_bytes)
+shm_mounts = [
+    mount
+    for mount in spec.get("mounts", [])
+    if isinstance(mount, dict) and mount.get("destination") == "/dev/shm"
+]
+expected_source = expected_userdata / "shm"
+if len(shm_mounts) != 1:
+    fail("effective OCI shared-memory mount is not unique")
+shm_mount = shm_mounts[0]
+if (
+    set(shm_mount) != {"destination", "type", "source", "options"}
+    or shm_mount.get("type") != "bind"
+    or shm_mount.get("source") != str(expected_source)
+    or not isinstance(shm_mount.get("options"), list)
+    or any(not isinstance(option, str) for option in shm_mount["options"])
+    or Counter(shm_mount["options"]) != SHM_OPTIONS
+):
+    fail("effective OCI shared-memory source shape changed")
+
+expected_pidfile = (
+    execution_state
+    / "runroot"
+    / "vfs-containers"
+    / container_id
+    / "userdata"
+    / "conmon.pid"
+)
+try:
+    pidfile_mode = expected_pidfile.lstat().st_mode
+except OSError as error:
+    raise SystemExit("conmon pidfile is inaccessible") from error
+if (
+    not stat.S_ISREG(pidfile_mode)
+    or expected_pidfile.is_symlink()
+    or expected_pidfile.resolve(strict=True) != expected_pidfile
+):
+    fail("conmon pidfile is not a symlink-free regular file")
+pidfile_text = expected_pidfile.read_text(encoding="ascii")
+if not re.fullmatch(r"[1-9][0-9]*\n", pidfile_text):
+    fail("conmon pidfile is malformed")
+if int(pidfile_text) != monitor_pid:
+    fail("conmon pidfile does not name the inspected monitor")
+
+proc_root = Path("/proc")
+monitor_before = process_identity(proc_root, monitor_pid, "monitor")
+container_before = process_identity(proc_root, container_pid, "container")
+monitor_process_root = proc_root / str(monitor_pid)
+container_process_root = proc_root / str(container_pid)
+monitor_mountinfo = (monitor_process_root / "mountinfo").read_text(encoding="utf-8")
+container_mountinfo = (container_process_root / "mountinfo").read_text(
+    encoding="utf-8"
+)
+source_probe = symlink_free_beneath(
+    monitor_process_root / "root", expected_source, "shared-memory source"
+)
+target_probe = symlink_free_beneath(
+    container_process_root / "root", Path("/dev/shm"), "shared-memory target"
+)
+source_statx = statx_identity(source_probe, "shared-memory source")
+target_statx = statx_identity(target_probe, "shared-memory target")
+monitor_after = process_identity(proc_root, monitor_pid, "monitor")
+container_after = process_identity(proc_root, container_pid, "container")
+if monitor_before != monitor_after:
+    fail("monitor identity changed during source observation")
+if container_before != container_after:
+    fail("container identity changed during source observation")
+if monitor_before["namespaces"]["user"] != container_before["namespaces"]["user"]:
+    fail("monitor and container user namespaces differ")
+if monitor_before["namespaces"]["mnt"] == container_before["namespaces"]["mnt"]:
+    fail("monitor does not provide a distinct source-owning mount namespace")
+
+monitor_mounts = parse_mountinfo(monitor_mountinfo, "monitor")
+owning = [
+    record
+    for record in monitor_mounts
+    if Path(record["destination"]) == expected_source
+    or Path(record["destination"]) in expected_source.parents
+]
+if not owning:
+    fail("no monitor mount owns the shared-memory source")
+deepest = max(len(PurePosixPath(record["destination"]).parts) for record in owning)
+owner_candidates = [
+    record
+    for record in owning
+    if len(PurePosixPath(record["destination"]).parts) == deepest
+]
+if len(owner_candidates) != 1:
+    fail("shared-memory source owner is missing or stacked")
+source_owner = owner_candidates[0]
+if (
+    source_owner["destination"] != str(expected_source)
+    or source_owner["access"] != "rw"
+    or source_owner["filesystem"] != "tmpfs"
+    or source_owner["root"] != "/"
+    or source_owner["source"] != "shm"
+    or source_owner["mount_id"] != str(source_statx["mount_id"])
+    or source_owner["major_minor"]
+    != f'{source_statx["device_major"]}:{source_statx["device_minor"]}'
+):
+    fail("shared-memory source owner changed")
+mounts_by_id = {record["mount_id"]: record for record in monitor_mounts}
+ancestor_ids = set()
+ancestor = source_owner
+while ancestor is not None:
+    if ancestor["mount_id"] in ancestor_ids:
+        fail("shared-memory source ancestry is cyclic")
+    ancestor_ids.add(ancestor["mount_id"])
+    ancestor = mounts_by_id.get(ancestor["parent_id"])
+
+target_candidates = [
+    record
+    for record in parse_mountinfo(container_mountinfo, "initialized container")
+    if record["destination"] == "/dev/shm"
+]
+if len(target_candidates) != 1:
+    fail("initialized shared-memory target is missing or stacked")
+target_mount = target_candidates[0]
+if (
+    target_mount["access"] != "ro"
+    or target_mount["filesystem"] != "tmpfs"
+    or target_mount["root"] != "/"
+    or target_mount["source"] != "shm"
+    or target_mount["mount_id"] != str(target_statx["mount_id"])
+    or target_mount["major_minor"]
+    != f'{target_statx["device_major"]}:{target_statx["device_minor"]}'
+):
+    fail("initialized shared-memory target changed")
+if (
+    source_statx["device_major"] != target_statx["device_major"]
+    or source_statx["device_minor"] != target_statx["device_minor"]
+):
+    fail("shared-memory source/target device mismatch")
+if source_statx["inode"] != target_statx["inode"]:
+    fail("shared-memory source/target inode mismatch")
+
+observation = {
+    "container_after": container_after,
+    "container_before": container_before,
+    "container_id": container_id,
+    "conmon_pidfile": {
+        "path": str(expected_pidfile),
+        "pid": monitor_pid,
+        "regular": True,
+        "symlink_free": True,
+    },
+    "expected_task_source": str(expected_source),
+    "monitor_after": monitor_after,
+    "monitor_before": monitor_before,
+    "oci_config_sha256": hashlib.sha256(oci_bytes).hexdigest(),
+    "oci_shm_mount": shm_mount,
+    "phase": phase,
+    "schema": SCHEMA,
+    "source_owner": source_owner,
+    "source_owner_candidates": len(owner_candidates),
+    "source_path_components_symlink_free": True,
+    "source_projection": {
+        key: source_owner[key]
+        for key in ("filesystem", "major_minor", "root", "source")
+    },
+    "source_statx": source_statx,
+    "target_mount": {
+        **{key: target_mount[key] for key in (
+            "access", "destination", "filesystem", "major_minor", "root", "source"
+        )},
+        "mount_chain": [
+            {
+                "mount_id": target_mount["mount_id"],
+                "parent_id": target_mount["parent_id"],
+            }
+        ],
+    },
+    "target_statx": target_statx,
+}
+if phase == "post-start-gate":
+    validate_previous(observation, Path(previous_argument))
+with output_path.open("x", encoding="utf-8") as output:
+    output.write(json.dumps(observation, indent=2, sort_keys=True) + "\n")
+PY_SHM_SOURCE_BINDING
+  chmod 500 "$shm_binding_observer" || return 125
+
+  local pre_start_shm_binding="$phase_boundary/pre-start-shm-source-binding.json"
+  /usr/bin/python3 "$shm_binding_observer" \
+    pre-start "$initialized_inspect" \
+    "$phase_boundary/effective-oci-config.json" "$pre_start_shm_binding" \
+    "$CQ_EXECUTION_STATE" "$container_id" - || return 125
+
   /usr/bin/python3 - \
     "$initialized_inspect" "$phase_boundary/effective-oci-config.json" \
     "$phase_boundary/effective-mounts.json" \
     "$phase_boundary/pre-start-mount-provenance.json" \
+    "$pre_start_shm_binding" \
     "$container_id" "$container_name" "$CQ_EXECUTOR_CONFIG_SHA256" \
     "$CQ_EXECUTION_STATE" "$CQ_SECCOMP_PROFILE" "$CQ_SECCOMP_SHA256" \
     "$CQ_REPO" /repo ro \
@@ -3868,13 +4512,14 @@ inspection_path = Path(sys.argv[1])
 spec_copy_path = Path(sys.argv[2])
 output_path = Path(sys.argv[3])
 provenance_path = Path(sys.argv[4])
-container_id = sys.argv[5]
-container_name = sys.argv[6]
-config_sha256 = sys.argv[7]
-execution_state = Path(sys.argv[8]).resolve(strict=True)
-seccomp_profile_path = Path(sys.argv[9]).resolve(strict=True)
-seccomp_profile_sha256 = sys.argv[10]
-mount_arguments = sys.argv[11:]
+shm_binding_path = Path(sys.argv[5])
+container_id = sys.argv[6]
+container_name = sys.argv[7]
+config_sha256 = sys.argv[8]
+execution_state = Path(sys.argv[9]).resolve(strict=True)
+seccomp_profile_path = Path(sys.argv[10]).resolve(strict=True)
+seccomp_profile_sha256 = sys.argv[11]
+mount_arguments = sys.argv[12:]
 if len(mount_arguments) % 3:
     raise SystemExit("mount expectation arguments are incomplete")
 
@@ -3933,6 +4578,8 @@ if not stat.S_ISREG(oci_mode) or resolved_oci_config_path.is_symlink():
     raise SystemExit("OCIConfigPath is not a regular file")
 
 spec_bytes = resolved_oci_config_path.read_bytes()
+if spec_bytes != spec_copy_path.read_bytes():
+    raise SystemExit("effective OCI specification changed during initialized admission")
 spec = json.loads(spec_bytes)
 if not isinstance(spec, dict) or spec.get("root", {}).get("readonly") is not True:
     raise SystemExit("effective OCI specification has a writable image root")
@@ -4263,6 +4910,22 @@ for mount in mounts:
     if is_bind:
         if destination not in runtime_state_policy or not source.startswith("/"):
             raise SystemExit(f"unallowlisted effective host mount: {destination!r}")
+        if destination == "/dev/shm":
+            shm_binding = json.loads(shm_binding_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(shm_binding, dict)
+                or shm_binding.get("schema")
+                != "io.nisavid.codiquary.conmon-shm-source-binding/v2"
+                or shm_binding.get("phase") != "pre-start"
+                or shm_binding.get("container_id") != container_id
+                or shm_binding.get("expected_task_source") != source
+                or shm_binding.get("oci_config_sha256")
+                != hashlib.sha256(spec_bytes).hexdigest()
+            ):
+                raise SystemExit("shared-memory source observation changed")
+            record["source"] = source
+            runtime_state_binds.append(record)
+            continue
         resolved_source = Path(source).resolve(strict=True)
         if not any(
             root == resolved_source or root in resolved_source.parents
@@ -4629,11 +5292,16 @@ for record in declared_host_binds:
 
 for record in runtime_state_binds:
     destination = record["destination"]
-    projection = projected_source(Path(record["source"]))
+    if destination == "/dev/shm":
+        projection = shm_binding["source_projection"]
+        source_control = "task-conmon-shm-bind"
+    else:
+        projection = projected_source(Path(record["source"]))
+        source_control = "task-state-bind"
     admit_exact(
         destination,
         {"access": record["access"], "destination": destination, **projection},
-        "task-state-bind",
+        source_control,
     )
 
 post_start_pseudo_policy = {
@@ -4816,8 +5484,6 @@ if remaining_mounts:
     )
 
 spec_sha256 = hashlib.sha256(spec_bytes).hexdigest()
-with spec_copy_path.open("xb") as output:
-    output.write(spec_bytes)
 output_path.write_text(
     json.dumps(
         {
@@ -4831,6 +5497,9 @@ output_path.write_text(
             "namespace_identities": dict(sorted(namespace_identities_before.items())),
             "readonly_paths": sorted(readonly_path_counts.elements()),
             "root_source": str(root_source),
+            "shm_source_binding_sha256": hashlib.sha256(
+                shm_binding_path.read_bytes()
+            ).hexdigest(),
             "runtime_pseudo_filesystems": sorted(
                 runtime_pseudo_filesystems,
                 key=lambda record: record["destination"],
@@ -4838,7 +5507,7 @@ output_path.write_text(
             "runtime_state_binds": sorted(
                 runtime_state_binds, key=lambda record: record["destination"]
             ),
-            "schema": "io.nisavid.codiquary.effective-mount-admission/v4",
+            "schema": "io.nisavid.codiquary.effective-mount-admission/v5",
         },
         indent=2,
         sort_keys=True,
@@ -4866,7 +5535,7 @@ PY_EFFECTIVE_MOUNTS
     || return 125
   mount_provenance_sha256=${mount_provenance_sha256%% *}
   [[ "$mount_provenance_sha256" =~ ^[0-9a-f]{64}$ ]] || return 125
-  local start_stdin="$phase_boundary/start-stdin.bin"
+  local start_stdin="$phase_boundary/start-stdin-expected.bin"
   /usr/bin/python3 - "$mount_provenance" "$phase_command_stdin" \
     "$start_stdin" <<'PY_START_STDIN' || return 125
 from pathlib import Path
@@ -4880,6 +5549,7 @@ if not provenance.endswith(b"\n") or b"\n" in provenance[:-1]:
     raise SystemExit("mount provenance must be one newline-terminated record")
 with output_path.open("xb") as output:
     output.write(provenance)
+    output.write(b"CODIQUARY_RELEASE_V1\n")
     output.write(phase_input_path.read_bytes())
 PY_START_STDIN
   chmod 600 "$start_stdin" || return 125
@@ -4890,21 +5560,169 @@ PY_START_STDIN
 
   local preflight_receipt="$phase_boundary/preflight.txt"
   local preflight_stderr="$phase_boundary/preflight-stderr.txt"
+  local start_stdin_fifo="$phase_boundary/start-stdin.fifo"
+  local start_stdin_observed="$phase_boundary/start-stdin-observed.bin"
+  local start_controller_done="$phase_boundary/start-controller-status.txt"
+  /usr/bin/mkfifo --mode=600 "$start_stdin_fifo" || return 125
+  test -p "$start_stdin_fifo" && test ! -L "$start_stdin_fifo" || return 125
   local start_call_status
-  if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-    "$CQ_PHASE-start" \
-    --controller-stdin "$start_stdin" "$start_stdin_sha256" \
-    start --attach --interactive "$container_id" \
-    > "$preflight_receipt" 2> "$preflight_stderr"; then
+  (
+    local held_controller_status
+    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
+      "$CQ_PHASE-start" \
+      --controller-stdin-stream \
+      "$start_stdin_fifo" "$start_stdin" "$start_stdin_sha256" \
+      "$start_stdin_observed" \
+      start --attach --interactive "$container_id"; then
+      held_controller_status=0
+    else
+      held_controller_status=$?
+    fi
+    printf '%s\n' "$held_controller_status" > "$start_controller_done"
+    exit "$held_controller_status"
+  ) > "$preflight_receipt" 2> "$preflight_stderr" &
+  local start_controller_pid=$!
+  local start_stream_fd
+  exec {start_stream_fd}>"$start_stdin_fifo" || return 125
+  local held_gate_status=0
+  if /usr/bin/tee /dev/null < "$mount_provenance" >&"$start_stream_fd"; then
+    :
+  else
+    held_gate_status=125
+  fi
+
+  local gate_seen=0
+  local gate_attempt
+  if test "$held_gate_status" -eq 0; then
+    for ((gate_attempt = 0; gate_attempt < 1200; gate_attempt++)); do
+      if /usr/bin/grep -Fqx CODIQUARY_EXECUTOR_PREFLIGHT_COMPLETE \
+        "$preflight_receipt"; then
+        gate_seen=1
+        break
+      fi
+      if /usr/bin/grep -Fqx CODIQUARY_EXECUTOR_PREFLIGHT_FAILED \
+        "$preflight_receipt"; then
+        break
+      fi
+      if test -f "$start_controller_done"; then
+        break
+      fi
+      /usr/bin/sleep 0.05
+    done
+  fi
+
+  local post_start_shm_binding=
+  if test "$gate_seen" -ne 1; then
+    held_gate_status=125
+  else
+    post_start_shm_binding="$phase_boundary/post-start-shm-source-binding.json"
+    if /usr/bin/python3 "$shm_binding_observer" \
+      post-start-gate "$initialized_inspect" \
+      "$phase_boundary/effective-oci-config.json" "$post_start_shm_binding" \
+      "$CQ_EXECUTION_STATE" "$container_id" "$pre_start_shm_binding"; then
+      :
+    else
+      held_gate_status=125
+    fi
+  fi
+
+  if test "$held_gate_status" -ne 0; then
+    exec {start_stream_fd}>&-
+    wait "$start_controller_pid" 2>/dev/null || :
+    /usr/bin/rm -f "$start_stdin_fifo"
+    local abort_remove_stdout="$phase_boundary/container-abort-remove.txt"
+    local abort_remove_stderr="$phase_boundary/container-abort-remove-stderr.txt"
+    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
+      "$CQ_PHASE-abort-remove" container rm "$container_id" \
+      > "$abort_remove_stdout" 2> "$abort_remove_stderr"; then
+      local -a abort_removed_ids=()
+      mapfile -t abort_removed_ids < "$abort_remove_stdout" || return 125
+      test "${#abort_removed_ids[@]}" -eq 1 || return 125
+      test "${abort_removed_ids[0]}" = "$container_id" || return 125
+    else
+      return 125
+    fi
+    return 125
+  fi
+
+  local tail_write_status=0
+  if printf '%s\n' CODIQUARY_RELEASE_V1 >&"$start_stream_fd"; then
+    :
+  else
+    tail_write_status=125
+  fi
+  if test "$tail_write_status" -eq 0; then
+    if /usr/bin/tee /dev/null < "$phase_command_stdin" >&"$start_stream_fd"; then
+      :
+    else
+      tail_write_status=125
+    fi
+  fi
+  if exec {start_stream_fd}>&-; then
+    :
+  else
+    tail_write_status=125
+  fi
+  if wait "$start_controller_pid"; then
     start_call_status=0
   else
     start_call_status=$?
   fi
-
+  /usr/bin/rm "$start_stdin_fifo" || return 125
+  if test "$tail_write_status" -ne 0; then
+    local failed_tail_remove_stdout="$phase_boundary/container-tail-abort-remove.txt"
+    local failed_tail_remove_stderr="$phase_boundary/container-tail-abort-remove-stderr.txt"
+    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
+      "$CQ_PHASE-tail-abort-remove" container rm "$container_id" \
+      > "$failed_tail_remove_stdout" 2> "$failed_tail_remove_stderr"; then
+      local -a failed_tail_removed_ids=()
+      mapfile -t failed_tail_removed_ids < "$failed_tail_remove_stdout" \
+        || return 125
+      test "${#failed_tail_removed_ids[@]}" -eq 1 || return 125
+      test "${failed_tail_removed_ids[0]}" = "$container_id" || return 125
+    else
+      return 125
+    fi
+    return 125
+  fi
   local start_controller_status
-  start_controller_status=$(cq_controller_receipt_status \
-    "$CQ_BOUNDARY_EVIDENCE/controller/$CQ_PHASE-start") || return 125
-  test "$start_call_status" -eq "$start_controller_status" || return 125
+  local recorded_background_status
+  local stream_completion_valid=1
+  if start_controller_status=$(cq_controller_receipt_status \
+    "$CQ_BOUNDARY_EVIDENCE/controller/$CQ_PHASE-start"); then
+    :
+  else
+    stream_completion_valid=0
+  fi
+  if recorded_background_status=$(/usr/bin/python3 -c \
+    'import pathlib,sys; print(int(pathlib.Path(sys.argv[1]).read_text()))' \
+    "$start_controller_done"); then
+    :
+  else
+    stream_completion_valid=0
+  fi
+  if test "$stream_completion_valid" -eq 1; then
+    test "$recorded_background_status" -eq "$start_call_status" \
+      || stream_completion_valid=0
+    test "$start_call_status" -eq "$start_controller_status" \
+      || stream_completion_valid=0
+  fi
+  if test "$stream_completion_valid" -ne 1; then
+    local failed_stream_remove_stdout="$phase_boundary/container-stream-abort-remove.txt"
+    local failed_stream_remove_stderr="$phase_boundary/container-stream-abort-remove-stderr.txt"
+    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
+      "$CQ_PHASE-stream-abort-remove" container rm "$container_id" \
+      > "$failed_stream_remove_stdout" 2> "$failed_stream_remove_stderr"; then
+      local -a failed_stream_removed_ids=()
+      mapfile -t failed_stream_removed_ids < "$failed_stream_remove_stdout" \
+        || return 125
+      test "${#failed_stream_removed_ids[@]}" -eq 1 || return 125
+      test "${failed_stream_removed_ids[0]}" = "$container_id" || return 125
+    else
+      return 125
+    fi
+    return 125
+  fi
 
   local exit_inspect="$phase_boundary/container-exit-inspect.json"
   local exit_inspect_stderr="$phase_boundary/container-exit-inspect-stderr.txt"
@@ -5207,12 +6025,17 @@ PY_OUTPUT
     "$boundary_relative/container-init-stderr.txt"
     "$boundary_relative/container-initialized-inspect.json"
     "$boundary_relative/container-initialized-inspect-stderr.txt"
+    "$boundary_relative/shm-source-binding-observer.py"
     "$boundary_relative/effective-oci-config.json"
+    "$boundary_relative/pre-start-shm-source-binding.json"
     "$boundary_relative/effective-mounts.json"
     "$boundary_relative/pre-start-mount-provenance.json"
-    "$boundary_relative/start-stdin.bin"
+    "$boundary_relative/start-stdin-expected.bin"
+    "$boundary_relative/start-stdin-observed.bin"
+    "$boundary_relative/start-controller-status.txt"
     "$boundary_relative/preflight.txt"
     "$boundary_relative/preflight-stderr.txt"
+    "$boundary_relative/post-start-shm-source-binding.json"
     "$boundary_relative/post-start-mount-projection.json"
     "$boundary_relative/container-exit-inspect.json"
     "$boundary_relative/container-exit-inspect-stderr.txt"
@@ -5281,17 +6104,28 @@ renew review.
 
 The controller, image inspection, initialized-container inspection, retained
 OCI specification, effective-mount admission, preflight, status, and boundary
-hashes remain in `CQ_BOUNDARY_EVIDENCE`, which is never mounted. The preflight
-receives the hash-bound pre-start mount projection as the first record on
-standard input. `cq_linux_run` preserves up to 4 MiB of finite caller input
-after that record; terminal input is normalized to an empty phase input. The
-provenance check consumes exactly the first record, and the phase command then
-receives the preserved caller bytes or EOF. The preflight writes to the
-container's stdout only until its completion marker, then
-redirects the phase command's stdout and stderr into that phase's fresh
-candidate-output mount. The phase command inherits no descriptor for the
-host-only receipt directory. The host validates every controller manifest's
-exact five
+hashes remain in `CQ_BOUNDARY_EVIDENCE`, which is never mounted. Before start,
+the host binds the retained OCI bytes, the initialized container and monitor
+process identities, the monitor pidfile, and the exact monitor-owned `tmpfs`
+object named as the OCI `/dev/shm` source to the initialized container's
+read-only `/dev/shm` object. The observer repeats those bindings while attached
+start is held at the preflight gate. A changed, missing, inaccessible,
+malformed, stacked, or substituted record closes the staged stream and removes
+the container without releasing the phase command.
+
+The preflight receives the hash-bound pre-start mount projection as the first
+record on a controller-observed FIFO stream. It emits its completion marker and
+waits for one literal release record. Only a successful repeated observation
+allows the host to write that record; the controller requires the complete
+observed stream to equal the precomputed expected bytes. `cq_linux_run`
+preserves up to 4 MiB of finite caller input after the release record; terminal
+input is normalized to an empty phase input. The provenance check consumes
+exactly the first record, and the phase command then receives the preserved
+caller bytes or EOF. The preflight writes to the container's stdout only until
+its completion marker, then redirects the phase command's stdout and stderr
+into that phase's fresh candidate-output mount. The phase command inherits no
+descriptor for the host-only receipt directory. The host validates every
+controller manifest's exact five
 entries and their checksums before reading its status. It accepts child status
 only from a retained container whose controller-owned inspection reports
 `Status=exited`, an empty operational `Error`, no OOM kill, and the same exit
@@ -5671,10 +6505,13 @@ boundary, or evidence dependency invalidates every affected later gate.
    destinations; successful initialization under the closed configuration; an
    `OCIConfigPath` inside task-owned state; exact effective-spec host binds;
    separately admitted runtime-state binds, pseudo-filesystems, masks, and
-   read-only paths; a stable initialized process identity; host-to-namespace
-   source projections for the image root and every bind; and an exact
-   post-start match on destinations, devices, roots, sources, filesystems, and
-   access before the phase command. Also observe direct tool identities, empty
+   read-only paths; stable initialized container and monitor process identities;
+   the exact monitor pidfile and monitor-owned shared-memory source object;
+   controller-to-namespace source projections for the image root and ordinary
+   binds; a linked monitor-source/container-target projection for `/dev/shm`;
+   and an exact post-start match on destinations, devices, roots, sources,
+   filesystems, and access before the phase command is released. Also observe
+   direct tool identities, empty
    routes, both `ENETUNREACH` probes, an unchanged effective specification after
    exit, clean exited state, successful wait and removal, the complete
    six-directory state inventory, and an atomically published boundary manifest
