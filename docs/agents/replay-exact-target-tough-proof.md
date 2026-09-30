@@ -3016,6 +3016,14 @@ expose the task-state `OCIConfigPath`. Admission copies those authoritative
 bytes, rejects every other host bind, and records task-state runtime binds and
 the closed runtime pseudo-filesystem allowlist separately.
 
+Admission reads each inspected process's exact unified cgroup membership with
+its process and namespace identities, then requires those observations to stay
+unchanged through the post-start gate. For `/sys/fs/cgroup`, it projects the
+container's cgroup path through the controller's cgroup2 mount, requires the
+path to end in this container's complete ID, and admits only that exact
+read-only device and subtree. The inherited parent path is observed rather
+than configured in the public procedure.
+
 Admission also reads the initialized process's PID, network, IPC, UTS, mount,
 and cgroup namespace identities before start and requires the in-container
 preflight to observe the same identities.
@@ -3621,6 +3629,7 @@ source_controls = {
     "oci-readonly-remount",
     "reviewed-image-root",
     "task-conmon-shm-bind",
+    "task-process-cgroup",
     "task-state-bind",
 }
 
@@ -3840,6 +3849,14 @@ for destination, record in expected_mounts.items():
         raise SystemExit(f"unadmitted masked destination: {destination!r}")
     if control == "oci-readonly-remount" and destination not in readonly_paths:
         raise SystemExit(f"unadmitted read-only destination: {destination!r}")
+if expected_mounts.get("/sys/fs/cgroup", {}).get("source_control") != "task-process-cgroup":
+    raise SystemExit("cgroup mount is not bound to the inspected process")
+if any(
+    record["source_control"] == "task-process-cgroup" and destination != "/sys/fs/cgroup"
+    for destination, record in expected_mounts.items()
+):
+    raise SystemExit("process cgroup source control used at another destination")
+
 if expected_mounts.get("/dev/shm", {}).get("source_control") \
     != "task-conmon-shm-bind":
     raise SystemExit("shared-memory provenance lacks monitor source binding")
@@ -4237,7 +4254,7 @@ import re
 import stat
 import sys
 
-SCHEMA = "io.nisavid.codiquary.conmon-shm-source-binding/v2"
+SCHEMA = "io.nisavid.codiquary.conmon-shm-source-binding/v3"
 REQUIRED_STATX_MASK = 0x1101
 AT_FDCWD = -100
 AT_SYMLINK_NOFOLLOW = 0x100
@@ -4379,7 +4396,20 @@ def process_identity(proc_root: Path, pid: int, label: str) -> dict[str, object]
         if not re.fullmatch(rf"{re.escape(proc_name)}:\[[1-9][0-9]*\]", identity):
             fail(f"{label} process has an invalid {name} namespace identity")
         namespaces[name] = identity
+    membership = (process_root / "cgroup").read_bytes().decode("utf-8")
+    match = re.fullmatch(r"0::(/[^\n\x00]*)\n", membership)
+    if match is None:
+        fail(f"{label} process has no exact unified cgroup membership")
+    cgroup_path = match.group(1)
+    if (
+        PurePosixPath(cgroup_path).as_posix() != cgroup_path
+        or cgroup_path.startswith("//")
+        or ".." in cgroup_path.split("/")
+        or any(ord(character) < 32 or ord(character) == 127 for character in cgroup_path)
+    ):
+        fail(f"{label} process cgroup path is not canonical")
     return {
+        "cgroup_path": cgroup_path,
         "namespaces": namespaces,
         "pid": pid,
         "proc_inode": process_stat.st_ino,
@@ -5147,7 +5177,7 @@ for mount in mounts:
             if (
                 not isinstance(shm_binding, dict)
                 or shm_binding.get("schema")
-                != "io.nisavid.codiquary.conmon-shm-source-binding/v2"
+                != "io.nisavid.codiquary.conmon-shm-source-binding/v3"
                 or shm_binding.get("phase") != "pre-start"
                 or shm_binding.get("container_id") != container_id
                 or shm_binding.get("expected_task_source") != source
@@ -5542,18 +5572,35 @@ post_start_pseudo_policy = {
     "/dev/pts": {("devpts", "devpts", "/", "rw")},
     "/proc": {("proc", "proc", "/", "rw")},
     "/sys": {("sysfs", "sysfs", "/", "ro")},
-    "/sys/fs/cgroup": {
-        ("cgroup", "cgroup", "/", "ro"),
-        ("cgroup", "cgroup2", "/", "ro"),
-        ("cgroup2", "cgroup", "/", "ro"),
-        ("cgroup2", "cgroup2", "/", "ro"),
-    },
 }
 for record in runtime_pseudo_filesystems:
     destination = record["destination"]
     observed = remaining_mounts.get(destination)
     if observed is None:
         raise SystemExit(f"initialized pseudo-filesystem is absent: {destination!r}")
+    if destination == "/sys/fs/cgroup":
+        # cgroupfs names this container's subtree with its complete container ID.
+        cgroup_path = shm_binding["container_before"]["cgroup_path"]
+        if PurePosixPath(cgroup_path).name != container_id:
+            raise SystemExit("initialized process cgroup is not bound to this container")
+        projection = projected_source(
+            Path("/sys/fs/cgroup").joinpath(*PurePosixPath(cgroup_path).parts[1:])
+        )
+        if projection["filesystem"] != "cgroup2":
+            raise SystemExit("controller cgroup source is not the unified hierarchy")
+        admit_exact(
+            destination,
+            {
+                "access": "ro",
+                "destination": destination,
+                "filesystem": "cgroup2",
+                "major_minor": projection["major_minor"],
+                "root": projection["root"],
+                "source": record["source"],
+            },
+            "task-process-cgroup",
+        )
+        continue
     observed_tuple = (
         observed["filesystem"],
         observed["source"],
