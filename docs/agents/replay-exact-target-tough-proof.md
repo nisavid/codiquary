@@ -3022,7 +3022,14 @@ unchanged through the post-start gate. For `/sys/fs/cgroup`, it projects the
 container's cgroup path through the controller's cgroup2 mount, requires the
 path to end in this container's complete ID, and admits only that exact
 read-only device and subtree. The inherited parent path is observed rather
-than configured in the public procedure.
+than configured in the public procedure. In the same admitted private cgroup
+namespace, preflight requires the process's unified membership to be exactly
+`0::/` followed by one LF. This binds the namespace root to that process's
+admitted cgroup. It then requires the cgroup mount root to be `/` in the
+consumer's namespace-relative view, with every other mount field and the
+mount chain unchanged. The controller's source record retains its original
+subtree root. The [kernel cgroup namespace documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#namespace)
+defines the reader-relative paths and fixed namespace root.
 
 Admission also reads the initialized process's PID, network, IPC, UTS, mount,
 and cgroup namespace identities before start and requires the in-container
@@ -3692,6 +3699,9 @@ observed_namespace_identities = {
 if observed_namespace_identities != expected_namespace_identities:
     raise SystemExit("post-start namespace identities differ from pre-start admission")
 
+if Path("/proc/self/cgroup").read_bytes() != b"0::/\n":
+    raise SystemExit("post-start process is not at its private cgroup namespace root")
+
 def counted_paths(values: list[object], label: str) -> Counter[str]:
     if any(
         not isinstance(value, str)
@@ -3986,6 +3996,8 @@ def compare_mount_provenance(
             for key, value in expected_mounts[destination].items()
             if key != "source_control"
         }
+        if destination == "/sys/fs/cgroup":
+            expected["root"] = "/"
         if observed != expected:
             raise SystemExit(
                 f"post-start mount source provenance changed: {destination!r}"
