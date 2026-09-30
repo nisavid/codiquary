@@ -2820,8 +2820,11 @@ evidence contract. The executor explicitly selects
 `seccomp.LICENSE` retains the upstream Apache-2.0 license. The controller binds
 the selected bytes to the create receipt, and initialized admission derives
 the complete Linux/amd64 projection for an empty capability bounding set and
-requires exact parsed structural equality. `--network=none` creates an
-unconfigured network namespace;
+requires exact parsed structural equality. The effective specification must
+contain exactly one pathless PID, network, IPC, UTS, mount, and cgroup
+namespace. This preserves rootless user-namespace behavior without admitting a
+shared or joined execution namespace. `--network=none` creates an unconfigured
+network namespace;
 the same container proves empty IPv4 and IPv6 route tables and requires numeric
 TEST-NET connections to fail with `ENETUNREACH` before it executes the phase
 command. The image root and all externally sourced input mounts are read-only.
@@ -2833,7 +2836,9 @@ expose the task-state `OCIConfigPath`. Admission copies those authoritative
 bytes, rejects every other host bind, and records task-state runtime binds and
 the closed runtime pseudo-filesystem allowlist separately.
 
-Admission also reads the initialized process's mount namespace before start.
+Admission also reads the initialized process's PID, network, IPC, UTS, mount,
+and cgroup namespace identities before start and requires the in-container
+preflight to observe the same identities.
 [Podman 6.1.0 initialization](https://github.com/containers/podman/blob/v6.1.0/libpod/container_internal.go#L1024-L1136)
 performs OCI create, and its
 [conmon runtime records the created process PID](https://github.com/containers/podman/blob/v6.1.0/libpod/oci_conmon_common.go#L1233-L1248)
@@ -3181,7 +3186,6 @@ PY_IMAGE
       test "$(grep -Ec "^Cap(Inh|Prm|Eff|Bnd|Amb):[[:space:]]+0+$" \
         /proc/self/status)" -eq 5
       grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status
-      readlink /proc/self/ns/net
       mount_provenance_path=/phase/tmp/.codiquary-pre-start-mount-provenance.json
       exec 3<&0
       python3 - "$mount_provenance_path" <<"PY_MOUNT_INPUT"
@@ -3274,9 +3278,16 @@ if canonical_provenance != provenance_text:
 if (
     not isinstance(provenance, dict)
     or set(provenance)
-    != {"container_id", "masked_paths", "mounts", "readonly_paths", "schema"}
+    != {
+        "container_id",
+        "masked_paths",
+        "mounts",
+        "namespace_identities",
+        "readonly_paths",
+        "schema",
+    }
     or provenance.get("schema")
-    != "io.nisavid.codiquary.pre-start-mount-provenance/v2"
+    != "io.nisavid.codiquary.pre-start-mount-provenance/v3"
     or not isinstance(provenance.get("container_id"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", provenance["container_id"])
     or not isinstance(provenance.get("masked_paths"), list)
@@ -3284,6 +3295,35 @@ if (
     or not isinstance(provenance.get("mounts"), list)
 ):
     raise SystemExit("mount provenance has the wrong schema")
+
+namespace_proc_names = {
+    "pid": "pid",
+    "network": "net",
+    "ipc": "ipc",
+    "uts": "uts",
+    "mount": "mnt",
+    "cgroup": "cgroup",
+}
+expected_namespace_identities = provenance.get("namespace_identities")
+if (
+    not isinstance(expected_namespace_identities, dict)
+    or set(expected_namespace_identities) != set(namespace_proc_names)
+    or any(
+        not isinstance(expected_namespace_identities[namespace_type], str)
+        or not re.fullmatch(
+            rf"{re.escape(proc_name)}:\[[1-9][0-9]*\]",
+            expected_namespace_identities[namespace_type],
+        )
+        for namespace_type, proc_name in namespace_proc_names.items()
+    )
+):
+    raise SystemExit("mount provenance has invalid namespace identities")
+observed_namespace_identities = {
+    namespace_type: os.readlink(f"/proc/self/ns/{proc_name}")
+    for namespace_type, proc_name in namespace_proc_names.items()
+}
+if observed_namespace_identities != expected_namespace_identities:
+    raise SystemExit("post-start namespace identities differ from pre-start admission")
 
 def counted_paths(values: list[object], label: str) -> Counter[str]:
     if any(
@@ -3595,6 +3635,7 @@ print(
                 "source_control": expected_mounts["/"]["source_control"],
             },
             "mount_provenance_sha256": provenance_sha256,
+            "namespace_identities": dict(sorted(observed_namespace_identities.items())),
             "runtime_mounts": {
                 destination: {
                     "access": record["access"],
@@ -4089,6 +4130,31 @@ linux_config = spec.get("linux")
 if not isinstance(linux_config, dict):
     raise SystemExit("effective OCI specification has no Linux policy")
 
+expected_namespace_types = {"pid", "network", "ipc", "uts", "mount", "cgroup"}
+raw_namespaces = linux_config.get("namespaces")
+if not isinstance(raw_namespaces, list):
+    raise SystemExit("effective OCI specification has no namespace list")
+namespace_types = []
+for namespace in raw_namespaces:
+    if (
+        not isinstance(namespace, dict)
+        or set(namespace) - {"type", "path"}
+        or not isinstance(namespace.get("type"), str)
+        or not isinstance(namespace.get("path", ""), str)
+    ):
+        raise SystemExit("effective OCI specification has a malformed namespace")
+    namespace_type = namespace["type"]
+    if namespace.get("path", ""):
+        raise SystemExit(f"effective OCI specification joins {namespace_type!r} namespace")
+    namespace_types.append(namespace_type)
+namespace_type_counts = Counter(namespace_types)
+if namespace_type_counts != Counter(expected_namespace_types):
+    raise SystemExit(
+        "effective OCI namespace types differ from the private contract: "
+        f"missing={sorted((Counter(expected_namespace_types) - namespace_type_counts).elements())!r} "
+        f"extra={sorted((namespace_type_counts - Counter(expected_namespace_types)).elements())!r}"
+    )
+
 def security_paths(field: str) -> list[str]:
     raw_paths = linux_config.get(field)
     if not isinstance(raw_paths, list):
@@ -4405,7 +4471,28 @@ def process_identity() -> tuple[int, str]:
         raise SystemExit("initialized process stat is incomplete")
     return process_stat.st_ino, remaining[19]
 
+namespace_proc_names = {
+    "pid": "pid",
+    "network": "net",
+    "ipc": "ipc",
+    "uts": "uts",
+    "mount": "mnt",
+    "cgroup": "cgroup",
+}
+
+def observe_namespace_identities() -> dict[str, str]:
+    identities = {}
+    for namespace_type, proc_name in namespace_proc_names.items():
+        identity = os.readlink(process_root / "ns" / proc_name)
+        if not re.fullmatch(rf"{re.escape(proc_name)}:\[[1-9][0-9]*\]", identity):
+            raise SystemExit(
+                f"initialized process has invalid {namespace_type} namespace identity"
+            )
+        identities[namespace_type] = identity
+    return identities
+
 process_identity_before = process_identity()
+namespace_identities_before = observe_namespace_identities()
 target_mountinfo = (process_root / "mountinfo").read_text(encoding="utf-8")
 namespace_root = process_root / "root"
 
@@ -4435,6 +4522,9 @@ required_readonly_paths = existing_security_paths(
 process_identity_after = process_identity()
 if process_identity_after != process_identity_before:
     raise SystemExit("initialized container process changed during mount observation")
+namespace_identities_after = observe_namespace_identities()
+if namespace_identities_after != namespace_identities_before:
+    raise SystemExit("initialized container namespaces changed during mount observation")
 
 target_mounts = parse_mountinfo(
     target_mountinfo, "initialized container", True
@@ -4738,6 +4828,7 @@ output_path.write_text(
             "oci_config_path": str(resolved_oci_config_path),
             "oci_config_sha256": spec_sha256,
             "masked_paths": sorted(masked_path_counts.elements()),
+            "namespace_identities": dict(sorted(namespace_identities_before.items())),
             "readonly_paths": sorted(readonly_path_counts.elements()),
             "root_source": str(root_source),
             "runtime_pseudo_filesystems": sorted(
@@ -4747,7 +4838,7 @@ output_path.write_text(
             "runtime_state_binds": sorted(
                 runtime_state_binds, key=lambda record: record["destination"]
             ),
-            "schema": "io.nisavid.codiquary.effective-mount-admission/v3",
+            "schema": "io.nisavid.codiquary.effective-mount-admission/v4",
         },
         indent=2,
         sort_keys=True,
@@ -4761,8 +4852,9 @@ provenance = {
     "mounts": sorted(
         provenance_records.values(), key=lambda record: record["destination"]
     ),
+    "namespace_identities": dict(sorted(namespace_identities_before.items())),
     "readonly_paths": sorted(readonly_path_counts.elements()),
-    "schema": "io.nisavid.codiquary.pre-start-mount-provenance/v2",
+    "schema": "io.nisavid.codiquary.pre-start-mount-provenance/v3",
 }
 with provenance_path.open("x", encoding="utf-8") as output:
     output.write(json.dumps(provenance, separators=(",", ":"), sort_keys=True) + "\n")
@@ -5180,7 +5272,8 @@ config/image ID, matching rootfs diff IDs, exact executor inventory, selected
 libclang target, closed Podman configuration before and after every action, a
 clean initialized state, the retained effective OCI specification, exactly ten
 declared host binds, only allowlisted task-state runtime binds and pseudo
-filesystems, the exact initialized namespace and security-submount set, matching
+filesystems, the exact initialized namespace types and identities and
+security-submount set, matching
 post-start device/root/source/filesystem/access provenance, dropped
 capabilities, `NoNewPrivs`, empty route tables, and both `ENETUNREACH` results.
 A failure releases no fallback command; correct or replace the boundary and
