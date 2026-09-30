@@ -4562,8 +4562,9 @@ if (
     or expected_pidfile.resolve(strict=True) != expected_pidfile
 ):
     fail("conmon pidfile is not a symlink-free regular file")
+# The pinned conmon writes decimal PID bytes without a line terminator.
 pidfile_text = expected_pidfile.read_text(encoding="ascii")
-if not re.fullmatch(r"[1-9][0-9]*\n", pidfile_text):
+if not re.fullmatch(r"[1-9][0-9]*", pidfile_text):
     fail("conmon pidfile is malformed")
 if int(pidfile_text) != monitor_pid:
     fail("conmon pidfile does not name the inspected monitor")
