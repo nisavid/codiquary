@@ -631,7 +631,6 @@ fn write_fixture(output: &Path, files: Vec<FixtureFile>) -> AuthorResult<()> {
         "public-keys",
         "metadata",
         "metadata/base",
-        "metadata/cases",
         "targets",
         "selections",
         "expected",
