@@ -548,20 +548,22 @@ cq_oci_controller() {
   local controller_stdin_expected=
   local controller_stdin_expected_sha256=
   local controller_stdin_observed=
+  local controller_stdin_ready=
   local controller_stdin_fifo_identity=
   local controller_stdin_validator=
   local controller_stdin_validator_sha256=
   if [[ ${1:-} = --controller-stdin-stream ]]; then
-    test "$#" -ge 6 || return 125
+    test "$#" -ge 7 || return 125
     test -z "$controller_stdin" || return 125
     controller_stdin_fifo=$2
     controller_stdin_expected=$3
     controller_stdin_expected_sha256=$4
     controller_stdin_observed=$5
-    shift 5 || return 125
+    controller_stdin_ready=$6
+    shift 6 || return 125
     for stream_path in \
       "$controller_stdin_fifo" "$controller_stdin_expected" \
-      "$controller_stdin_observed"; do
+      "$controller_stdin_observed" "$controller_stdin_ready"; do
       [[ "$stream_path" = /* && "$stream_path" != *$'\n'* ]] || return 125
     done
     [[ "$controller_stdin_expected_sha256" =~ ^[0-9a-f]{64}$ ]] \
@@ -571,6 +573,9 @@ cq_oci_controller() {
     test -f "$controller_stdin_expected" \
       && test ! -L "$controller_stdin_expected" || return 125
     test ! -e "$controller_stdin_observed" || return 125
+    test ! -e "$controller_stdin_ready" || return 125
+    test "$controller_stdin_observed" != "$controller_stdin_ready" \
+      || return 125
     test "$(/usr/bin/stat -c '%a' "$controller_stdin_fifo")" = 600 \
       || return 125
     test "$(/usr/bin/stat -c '%u' "$controller_stdin_fifo")" \
@@ -691,6 +696,35 @@ PY_CONTROLLER_STDIN
     > "$receipt_dir/argv.txt" || return 125
   printf '\n' >> "$receipt_dir/argv.txt" || return 125
 
+  if [[ -n "$controller_stdin_fifo" ]]; then
+    test -d "$hooks_dir" && test ! -L "$hooks_dir" || return 125
+    test "$(/usr/bin/stat -c '%a' "$hooks_dir")" = 500 || return 125
+    unexpected_hooks=$(/usr/bin/find "$hooks_dir" -mindepth 1 -print -quit) \
+      || return 125
+    test -z "$unexpected_hooks" || return 125
+    unexpected_config=$(/usr/bin/find "$state/config" -mindepth 1 \
+      ! -path "$state/config/containers" \
+      ! -path "$containers_conf" ! -path "$mounts_conf" -print -quit) \
+      || return 125
+    test -z "$unexpected_config" || return 125
+    {
+      printf '%s  %s\n' \
+        "$CQ_PODMAN_SHA256" /usr/bin/podman \
+        "$CQ_CRUN_SHA256" /usr/bin/crun \
+        "$CQ_CONMON_SHA256" /usr/bin/conmon \
+        "$CQ_PASTA_SHA256" /usr/bin/pasta \
+        "$CQ_EMPTY_CONFIG_SHA256" "$containers_conf" \
+        "$CQ_EMPTY_CONFIG_SHA256" "$mounts_conf" \
+        "$controller_stdin_expected_sha256" "$controller_stdin_expected" \
+        "$controller_stdin_validator_sha256" "$controller_stdin_validator"
+    } | /usr/bin/sha256sum -c - >> "$receipt_dir/controller.sha256" \
+      || return 125
+    printf '%s\n' "$controller_stdin_fifo_identity" \
+      > "$controller_stdin_ready" || return 125
+    test -f "$controller_stdin_ready" \
+      && test ! -L "$controller_stdin_ready" || return 125
+  fi
+
   local status
   if [[ -n "$controller_stdin_fifo" ]]; then
     if (
@@ -732,6 +766,10 @@ PY_CONTROLLER_STDIN
       && test ! -L "$controller_stdin_observed" || return 125
     /usr/bin/cmp --silent \
       "$controller_stdin_expected" "$controller_stdin_observed" || return 125
+    test -f "$controller_stdin_ready" \
+      && test ! -L "$controller_stdin_ready" || return 125
+    test "$(<"$controller_stdin_ready")" \
+      = "$controller_stdin_fifo_identity" || return 125
   fi
   {
     printf '%s  %s\n' \
@@ -3030,16 +3068,25 @@ therefore stops before candidate execution. A path alias with the same device,
 root, and mount source exposes the same effective source rather than different
 bytes or authority.
 
-Neither this function nor the OCI controller changes the caller's shell
-options. The controller creates and retains a named container, validates its
-declared mounts, initializes it, admits the effective OCI specification, and
-only then starts it attached. It validates every completed controller receipt,
+The function runs in a subshell, so its traps, descriptors, helper functions,
+and option-sensitive state cannot escape to the caller. The controller creates
+and retains a named container. A created inspection must bind its exact ID,
+name, image, and non-auto-remove state before the function owns it. From that
+point, one exit handler covers every rejection through final publication and
+attempts exactly one removal through the checked controller. A valid remove
+receipt and matching returned ID record absence. An indeterminate create,
+unverified identity, or unavailable checked removal records
+`reconciliation-required` with retained-or-indeterminate state; it never falls
+back to an ambient OCI command.
+
+After ownership is established, the function validates declared mounts,
+initializes the container, admits the effective OCI specification, and only
+then starts it attached. It validates every completed controller receipt,
 inspects a clean exited state, obtains the printed exit code through a
-separately successful `podman wait`, proves that the effective specification
-did not change across attached start, and removes the container through another
-controller action. The function requires the inspected, waited, and
-attached-start statuses to agree, and returns that status only after the
-preflight, complete phase-state inventory, cleanup, and atomic boundary receipt
+separately successful `podman wait`, and proves that the effective specification
+did not change across attached start. The inspected, waited, and attached-start
+statuses must agree. The function returns that status only after preflight,
+complete phase-state inventory, checked cleanup, and atomic boundary receipt
 succeed. A boundary, controller, Podman, or evidence failure returns status
 `125` without a completed `boundary.sha256`; a child that returns `125` has a
 completed exit-state and boundary receipt. Callers expecting a nonzero child
@@ -3047,7 +3094,7 @@ status must use an `if` condition to observe it without changing their own
 `errexit` policy.
 
 ```sh
-cq_linux_run() {
+cq_linux_run() (
   if [[ -z ${CQ_PHASE:-} ]]; then
     printf '%s\n' 'CQ_PHASE must name a receipt-safe phase' >&2
     return 125
@@ -3072,6 +3119,173 @@ cq_linux_run() {
     "$phase_state" "$phase_target" "$phase_tmp" "$phase_home" \
     "$phase_output" "$phase_fixtures" "$phase_work" \
     "$phase_boundary" || return 125
+
+  local cleanup_armed=0
+  local cleanup_attempted=0
+  local cleanup_complete=0
+  local container_id=
+  local container_ownership="$phase_boundary/container-ownership.json"
+  local cleanup_record="$phase_boundary/container-cleanup.json"
+  local cleanup_stdout="$phase_boundary/container-remove.txt"
+  local cleanup_stderr="$phase_boundary/container-remove-stderr.txt"
+  local start_stdin_fifo=
+  local start_stream_fd=
+  local start_controller_pid=
+
+  cq_linux_write_cleanup_record() {
+    test "$#" -eq 5 || return 1
+    local outcome=$1
+    local ownership=$2
+    local observed_state=$3
+    local reconciliation_required=$4
+    local reason=$5
+    test ! -e "$cleanup_record" || return 1
+    /usr/bin/python3 - "$cleanup_record" "$container_id" \
+      "$outcome" "$ownership" "$observed_state" \
+      "$reconciliation_required" "$reason" \
+      "controller/$CQ_PHASE-remove/receipt.sha256" <<'PY_CLEANUP_RECORD'
+import json
+from pathlib import Path
+import sys
+
+(
+    output_path,
+    container_id,
+    outcome,
+    ownership,
+    observed_state,
+    reconciliation_required,
+    reason,
+    removal_receipt,
+) = sys.argv[1:]
+if outcome not in {"removed", "reconciliation-required"}:
+    raise SystemExit("invalid cleanup outcome")
+if ownership not in {"unknown", "verified"}:
+    raise SystemExit("invalid cleanup ownership")
+if observed_state not in {"absent", "retained-or-indeterminate"}:
+    raise SystemExit("invalid cleanup state")
+record = {
+    "container_id": container_id or None,
+    "outcome": outcome,
+    "ownership": ownership,
+    "reason": reason,
+    "reconciliation_required": reconciliation_required == "true",
+    "removal_receipt": removal_receipt if outcome == "removed" else None,
+    "schema": "io.nisavid.codiquary.container-cleanup/v1",
+    "state": observed_state,
+}
+with Path(output_path).open("x", encoding="utf-8") as output:
+    output.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY_CLEANUP_RECORD
+  }
+
+  cq_linux_ownership_is_verified() {
+    test -n "$container_id" || return 1
+    test -f "$container_ownership" && test ! -L "$container_ownership" \
+      || return 1
+    /usr/bin/python3 - "$container_ownership" "$container_id" \
+      "$container_name" "$CQ_EXECUTOR_CONFIG_SHA256" <<'PY_OWNERSHIP'
+import json
+from pathlib import Path
+import sys
+
+record = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = {
+    "container_id": sys.argv[2],
+    "container_name": sys.argv[3],
+    "image_config_sha256": sys.argv[4],
+    "schema": "io.nisavid.codiquary.container-ownership/v1",
+}
+if record != expected:
+    raise SystemExit("container ownership record changed")
+PY_OWNERSHIP
+  }
+
+  cq_linux_remove_owned() {
+    test "$cleanup_attempted" -eq 0 || return 1
+    cleanup_attempted=1
+    if ! cq_linux_ownership_is_verified; then
+      cq_linux_write_cleanup_record \
+        reconciliation-required unknown retained-or-indeterminate true \
+        ownership-not-verified || :
+      printf '%s\n' \
+        'container cleanup requires reconciliation: ownership is unverified' >&2
+      return 1
+    fi
+
+    local cleanup_call_status
+    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
+      "$CQ_PHASE-remove" container rm "$container_id" \
+      > "$cleanup_stdout" 2> "$cleanup_stderr"; then
+      cleanup_call_status=0
+    else
+      cleanup_call_status=$?
+    fi
+    local cleanup_controller_status=
+    local cleanup_valid=1
+    if cleanup_controller_status=$(cq_controller_receipt_status \
+      "$CQ_BOUNDARY_EVIDENCE/controller/$CQ_PHASE-remove"); then
+      :
+    else
+      cleanup_valid=0
+    fi
+    if test "$cleanup_valid" -eq 1; then
+      test "$cleanup_call_status" -eq "$cleanup_controller_status" \
+        || cleanup_valid=0
+      test "$cleanup_controller_status" -eq 0 || cleanup_valid=0
+    fi
+    local -a removed_ids=()
+    if test "$cleanup_valid" -eq 1; then
+      mapfile -t removed_ids < "$cleanup_stdout" || cleanup_valid=0
+      test "${#removed_ids[@]}" -eq 1 || cleanup_valid=0
+      test "${removed_ids[0]:-}" = "$container_id" || cleanup_valid=0
+    fi
+    if test "$cleanup_valid" -eq 1; then
+      cq_linux_write_cleanup_record \
+        removed verified absent false controller-verified-remove || return 1
+      cleanup_complete=1
+      return 0
+    fi
+
+    cq_linux_write_cleanup_record \
+      reconciliation-required verified retained-or-indeterminate true \
+      controller-remove-unavailable-or-invalid || :
+    printf '%s\n' \
+      'container cleanup requires reconciliation: checked removal failed' >&2
+    return 1
+  }
+
+  cq_linux_cleanup_on_exit() {
+    local prior_status=$1
+    trap - EXIT
+    if [[ -n "$start_stream_fd" ]]; then
+      exec {start_stream_fd}>&- 2>/dev/null || :
+      start_stream_fd=
+    fi
+    if [[ "$start_controller_pid" =~ ^[1-9][0-9]*$ ]]; then
+      wait "$start_controller_pid" 2>/dev/null || :
+      start_controller_pid=
+    fi
+    if [[ -n "$start_stdin_fifo" ]]; then
+      /usr/bin/rm -f "$start_stdin_fifo" || :
+    fi
+    if test "$cleanup_armed" -eq 1 \
+      && test "$cleanup_complete" -eq 0 \
+      && test "$cleanup_attempted" -eq 0; then
+      if cq_linux_ownership_is_verified; then
+        cq_linux_remove_owned || :
+      else
+        cleanup_attempted=1
+        cq_linux_write_cleanup_record \
+          reconciliation-required unknown retained-or-indeterminate true \
+          ownership-not-verified || :
+        printf '%s\n' \
+          'container cleanup requires reconciliation: ownership is unverified' >&2
+      fi
+    fi
+    return "$prior_status"
+  }
+  trap 'cq_linux_cleanup_on_exit "$?"' EXIT
 
   local phase_command_stdin="$phase_boundary/phase-command-stdin.bin"
   if [[ -t 0 ]]; then
@@ -3834,6 +4048,7 @@ PY_NETWORK
   local create_stdout="$phase_boundary/container-id.txt"
   local create_stderr="$phase_boundary/container-create-stderr.txt"
   local create_call_status
+  cleanup_armed=1
   if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
     "$CQ_PHASE-create" \
     --controller-input "$CQ_SECCOMP_PROFILE" "$CQ_SECCOMP_SHA256" \
@@ -3851,7 +4066,7 @@ PY_NETWORK
   local -a container_ids=()
   mapfile -t container_ids < "$create_stdout" || return 125
   test "${#container_ids[@]}" -eq 1 || return 125
-  local container_id=${container_ids[0]}
+  container_id=${container_ids[0]}
   [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 125
 
   local created_inspect="$phase_boundary/container-created-inspect.json"
@@ -3874,7 +4089,8 @@ PY_NETWORK
 
   /usr/bin/python3 - \
     "$created_inspect" "$phase_boundary/declared-mounts.json" \
-    "$container_id" "$container_name" "$CQ_EXECUTOR_CONFIG_SHA256" \
+    "$container_ownership" "$container_id" "$container_name" \
+    "$CQ_EXECUTOR_CONFIG_SHA256" \
     "$CQ_REPO" /repo ro \
     "$CQ_INPUTS" /inputs ro \
     "$CQ_CARGO_HOME" /cargo ro \
@@ -3892,10 +4108,11 @@ import sys
 
 inspection_path = Path(sys.argv[1])
 output_path = Path(sys.argv[2])
-container_id = sys.argv[3]
-container_name = sys.argv[4]
-config_sha256 = sys.argv[5]
-mount_arguments = sys.argv[6:]
+ownership_path = Path(sys.argv[3])
+container_id = sys.argv[4]
+container_name = sys.argv[5]
+config_sha256 = sys.argv[6]
+mount_arguments = sys.argv[7:]
 if len(mount_arguments) % 3:
     raise SystemExit("mount expectation arguments are incomplete")
 expected = {}
@@ -3920,6 +4137,20 @@ if container["Image"].removeprefix("sha256:") != config_sha256:
     raise SystemExit("created container image changed")
 if container["HostConfig"].get("AutoRemove") is not False:
     raise SystemExit("created container must be retained")
+with ownership_path.open("x", encoding="utf-8") as output:
+    output.write(
+        json.dumps(
+            {
+                "container_id": container_id,
+                "container_name": container_name,
+                "image_config_sha256": config_sha256,
+                "schema": "io.nisavid.codiquary.container-ownership/v1",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
 observed = {}
 for mount in container["Mounts"]:
@@ -5560,8 +5791,9 @@ PY_START_STDIN
 
   local preflight_receipt="$phase_boundary/preflight.txt"
   local preflight_stderr="$phase_boundary/preflight-stderr.txt"
-  local start_stdin_fifo="$phase_boundary/start-stdin.fifo"
+  start_stdin_fifo="$phase_boundary/start-stdin.fifo"
   local start_stdin_observed="$phase_boundary/start-stdin-observed.bin"
+  local start_controller_ready="$phase_boundary/start-controller-ready.txt"
   local start_controller_done="$phase_boundary/start-controller-status.txt"
   /usr/bin/mkfifo --mode=600 "$start_stdin_fifo" || return 125
   test -p "$start_stdin_fifo" && test ! -L "$start_stdin_fifo" || return 125
@@ -5572,7 +5804,7 @@ PY_START_STDIN
       "$CQ_PHASE-start" \
       --controller-stdin-stream \
       "$start_stdin_fifo" "$start_stdin" "$start_stdin_sha256" \
-      "$start_stdin_observed" \
+      "$start_stdin_observed" "$start_controller_ready" \
       start --attach --interactive "$container_id"; then
       held_controller_status=0
     else
@@ -5581,11 +5813,35 @@ PY_START_STDIN
     printf '%s\n' "$held_controller_status" > "$start_controller_done"
     exit "$held_controller_status"
   ) > "$preflight_receipt" 2> "$preflight_stderr" &
-  local start_controller_pid=$!
-  local start_stream_fd
-  exec {start_stream_fd}>"$start_stdin_fifo" || return 125
+  start_controller_pid=$!
+  exec {start_stream_fd}<>"$start_stdin_fifo" || return 125
   local held_gate_status=0
-  if /usr/bin/tee /dev/null < "$mount_provenance" >&"$start_stream_fd"; then
+  local readiness_seen=0
+  local readiness_attempt
+  local expected_fifo_identity
+  expected_fifo_identity=$(/usr/bin/stat -c '%d:%i' "$start_stdin_fifo") \
+    || return 125
+  for ((readiness_attempt = 0; readiness_attempt < 1200; readiness_attempt++)); do
+    if test -f "$start_controller_ready" \
+      && test ! -L "$start_controller_ready" \
+      && test "$(<"$start_controller_ready")" = "$expected_fifo_identity"; then
+      readiness_seen=1
+      break
+    fi
+    if test -f "$start_controller_done"; then
+      break
+    fi
+    /usr/bin/sleep 0.05
+  done
+  if test "$readiness_seen" -ne 1; then
+    held_gate_status=125
+    printf '%s\n' \
+      'start controller rejected before FIFO readiness' \
+      > "$phase_boundary/start-terminal-diagnostic.txt"
+    printf '%s\n' \
+      'start controller rejected before FIFO readiness' >&2
+  elif /usr/bin/tee /dev/null \
+    < "$mount_provenance" >&"$start_stream_fd"; then
     :
   else
     held_gate_status=125
@@ -5628,20 +5884,11 @@ PY_START_STDIN
 
   if test "$held_gate_status" -ne 0; then
     exec {start_stream_fd}>&-
+    start_stream_fd=
     wait "$start_controller_pid" 2>/dev/null || :
+    start_controller_pid=
     /usr/bin/rm -f "$start_stdin_fifo"
-    local abort_remove_stdout="$phase_boundary/container-abort-remove.txt"
-    local abort_remove_stderr="$phase_boundary/container-abort-remove-stderr.txt"
-    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-      "$CQ_PHASE-abort-remove" container rm "$container_id" \
-      > "$abort_remove_stdout" 2> "$abort_remove_stderr"; then
-      local -a abort_removed_ids=()
-      mapfile -t abort_removed_ids < "$abort_remove_stdout" || return 125
-      test "${#abort_removed_ids[@]}" -eq 1 || return 125
-      test "${abort_removed_ids[0]}" = "$container_id" || return 125
-    else
-      return 125
-    fi
+    start_stdin_fifo=
     return 125
   fi
 
@@ -5659,6 +5906,7 @@ PY_START_STDIN
     fi
   fi
   if exec {start_stream_fd}>&-; then
+    start_stream_fd=
     :
   else
     tail_write_status=125
@@ -5668,21 +5916,10 @@ PY_START_STDIN
   else
     start_call_status=$?
   fi
+  start_controller_pid=
   /usr/bin/rm "$start_stdin_fifo" || return 125
+  start_stdin_fifo=
   if test "$tail_write_status" -ne 0; then
-    local failed_tail_remove_stdout="$phase_boundary/container-tail-abort-remove.txt"
-    local failed_tail_remove_stderr="$phase_boundary/container-tail-abort-remove-stderr.txt"
-    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-      "$CQ_PHASE-tail-abort-remove" container rm "$container_id" \
-      > "$failed_tail_remove_stdout" 2> "$failed_tail_remove_stderr"; then
-      local -a failed_tail_removed_ids=()
-      mapfile -t failed_tail_removed_ids < "$failed_tail_remove_stdout" \
-        || return 125
-      test "${#failed_tail_removed_ids[@]}" -eq 1 || return 125
-      test "${failed_tail_removed_ids[0]}" = "$container_id" || return 125
-    else
-      return 125
-    fi
     return 125
   fi
   local start_controller_status
@@ -5708,19 +5945,6 @@ PY_START_STDIN
       || stream_completion_valid=0
   fi
   if test "$stream_completion_valid" -ne 1; then
-    local failed_stream_remove_stdout="$phase_boundary/container-stream-abort-remove.txt"
-    local failed_stream_remove_stderr="$phase_boundary/container-stream-abort-remove-stderr.txt"
-    if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-      "$CQ_PHASE-stream-abort-remove" container rm "$container_id" \
-      > "$failed_stream_remove_stdout" 2> "$failed_stream_remove_stderr"; then
-      local -a failed_stream_removed_ids=()
-      mapfile -t failed_stream_removed_ids < "$failed_stream_remove_stdout" \
-        || return 125
-      test "${#failed_stream_removed_ids[@]}" -eq 1 || return 125
-      test "${failed_stream_removed_ids[0]}" = "$container_id" || return 125
-    else
-      return 125
-    fi
     return 125
   fi
 
@@ -5903,25 +6127,7 @@ output_path.write_text(
 )
 PY_EFFECTIVE_RECHECK
 
-  local cleanup_stdout="$phase_boundary/container-remove.txt"
-  local cleanup_stderr="$phase_boundary/container-remove-stderr.txt"
-  local cleanup_call_status
-  if cq_oci_controller "$CQ_EXECUTION_STATE" "$CQ_BOUNDARY_EVIDENCE" \
-    "$CQ_PHASE-remove" container rm "$container_id" \
-    > "$cleanup_stdout" 2> "$cleanup_stderr"; then
-    cleanup_call_status=0
-  else
-    cleanup_call_status=$?
-  fi
-  local cleanup_controller_status
-  cleanup_controller_status=$(cq_controller_receipt_status \
-    "$CQ_BOUNDARY_EVIDENCE/controller/$CQ_PHASE-remove") || return 125
-  test "$cleanup_call_status" -eq "$cleanup_controller_status" || return 125
-  test "$cleanup_controller_status" -eq 0 || return 125
-  local -a removed_ids=()
-  mapfile -t removed_ids < "$cleanup_stdout" || return 125
-  test "${#removed_ids[@]}" -eq 1 || return 125
-  test "${removed_ids[0]}" = "$container_id" || return 125
+  cq_linux_remove_owned || return 125
 
   /usr/bin/python3 - "$phase_state" \
     "$phase_boundary/phase-state-inventory.json" <<'PY_OUTPUT' \
@@ -6020,6 +6226,7 @@ PY_OUTPUT
     "$boundary_relative/container-create-stderr.txt"
     "$boundary_relative/container-created-inspect.json"
     "$boundary_relative/container-created-inspect-stderr.txt"
+    "$boundary_relative/container-ownership.json"
     "$boundary_relative/declared-mounts.json"
     "$boundary_relative/container-init.txt"
     "$boundary_relative/container-init-stderr.txt"
@@ -6032,6 +6239,7 @@ PY_OUTPUT
     "$boundary_relative/pre-start-mount-provenance.json"
     "$boundary_relative/start-stdin-expected.bin"
     "$boundary_relative/start-stdin-observed.bin"
+    "$boundary_relative/start-controller-ready.txt"
     "$boundary_relative/start-controller-status.txt"
     "$boundary_relative/preflight.txt"
     "$boundary_relative/preflight-stderr.txt"
@@ -6046,6 +6254,7 @@ PY_OUTPUT
     "$boundary_relative/effective-oci-config-recheck.json"
     "$boundary_relative/container-remove.txt"
     "$boundary_relative/container-remove-stderr.txt"
+    "$boundary_relative/container-cleanup.json"
     "$boundary_relative/phase-state-inventory.json"
     "controller/$CQ_PHASE-image-inspect/receipt.sha256"
     "controller/$CQ_PHASE-create/receipt.sha256"
@@ -6077,8 +6286,9 @@ PY_OUTPUT
   cq_validate_sha256_manifest "$CQ_BOUNDARY_EVIDENCE" \
     "$boundary_relative/boundary.sha256" "${boundary_entries[@]}" \
     || return 125
+  trap - EXIT
   return "$child_status"
-}
+)
 ```
 
 The first container after the offline load is only an admission observation.
@@ -6110,14 +6320,22 @@ process identities, the monitor pidfile, and the exact monitor-owned `tmpfs`
 object named as the OCI `/dev/shm` source to the initialized container's
 read-only `/dev/shm` object. The observer repeats those bindings while attached
 start is held at the preflight gate. A changed, missing, inaccessible,
-malformed, stacked, or substituted record closes the staged stream and removes
-the container without releasing the phase command.
+malformed, stacked, or substituted record closes the staged stream without
+releasing the phase command and enters the same checked cleanup path. If the
+controller itself has become unusable, the cleanup record requires
+reconciliation instead of claiming removal.
 
 The preflight receives the hash-bound pre-start mount projection as the first
-record on a controller-observed FIFO stream. It emits its completion marker and
-waits for one literal release record. Only a successful repeated observation
-allows the host to write that record; the controller requires the complete
-observed stream to equal the precomputed expected bytes. `cq_linux_run`
+record on a controller-observed FIFO stream. The controller publishes the
+FIFO's recorded identity only after configuration, hooks, executable bytes,
+versions, inputs, and stream validator pass their final pre-reader checks. The
+parent holds a read-write endpoint, waits for that readiness record or the
+controller's terminal status, and closes and removes the FIFO on every branch;
+an early controller rejection therefore cannot strand a blocking writer. The
+preflight emits its completion marker and waits for one literal release record.
+Only a successful repeated observation allows the host to write that record;
+the controller requires the complete observed stream to equal the precomputed
+expected bytes. `cq_linux_run`
 preserves up to 4 MiB of finite caller input after the release record; terminal
 input is normalized to an empty phase input. The provenance check consumes
 exactly the first record, and the phase command then receives the preserved
