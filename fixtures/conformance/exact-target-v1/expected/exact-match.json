@@ -1,0 +1,21 @@
+{
+  "case_id": "exact-match",
+  "expected_authenticated_target": {
+    "identity": "exact-match.txt",
+    "length": 42,
+    "sha256": "e2980f3df2f5f644360a732ce7a09e07af4d91010360a933077918622c57b326"
+  },
+  "expected_helper_call_count": 1,
+  "expected_metadata_request_count": 4,
+  "expected_metadata_requests": [
+    "2.root.json",
+    "timestamp.json",
+    "1.snapshot.json",
+    "1.targets.json"
+  ],
+  "expected_semantic_observation": "verified_exact_target",
+  "expected_target_body_request": "e2980f3df2f5f644360a732ce7a09e07af4d91010360a933077918622c57b326.exact-match.txt",
+  "expected_target_body_request_count": 1,
+  "fixed_verification_instant": "2030-01-01T00:00:00Z",
+  "same_held_allocation": true
+}

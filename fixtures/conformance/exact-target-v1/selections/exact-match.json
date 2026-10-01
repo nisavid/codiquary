@@ -1,0 +1,8 @@
+{
+  "channel": "fixture",
+  "platform": "portable",
+  "policy_profile": "synthetic-public-v1",
+  "product": "io.nisavid.codiquary.synthetic-widget",
+  "purpose": "verification",
+  "version": "1.0.0"
+}
