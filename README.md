@@ -46,18 +46,21 @@ install or execute anything.
 - **Operator tools** guide explicit stages and report denial, failure, or
   possible effects without inventing hidden session authority.
 
-Codophylax is the public operator, with the future CLI/TUI command `cophax`
+Codophylax is the public operator, with the prospective CLI/TUI command `cophax`
 (“co-fax”). One root Rust 2024 package contains the `codiquary` library and
-`cophax` executable. Both are non-operational build placeholders: the library
-has no public API, and the command reports that it is not implemented and exits
-with failure. Command grammar and wire schemas remain with their owning design
-tickets. Worker and documentation names remain unassigned.
+`cophax` executable. The current descriptive scaffold exposes a public,
+value-free inventory of predefined expected cases. `cophax conformance` prints
+each case's identifier, expected-result label, and description; it does not
+evaluate inputs or produce observed conformance. Command grammar and wire
+schemas remain with their owning design tickets. Worker and documentation names
+remain unassigned.
 
 ## Repository layout
 
 - [`contracts/`](contracts/) will contain normative serialized contracts and
   lifecycle rules.
-- [`src/`](src/) contains the single primary distribution's build placeholders.
+- [`src/`](src/) contains the descriptive expected-case inventory and its
+  current command renderer.
 - [`adapters/`](adapters/) defines role-specific interfaces and reference
   implementations only where a real seam exists.
 - [`profiles/`](profiles/) contains complete public policy profiles without
@@ -82,10 +85,12 @@ cargo build --frozen
 cargo test --frozen
 ```
 
-There are no dependencies or behavioral tests yet. `Cargo.lock` and the offline
-Cargo configuration are committed; a vendored source tree is needed only when
-actual dependencies are introduced. A successful test run currently reports
-zero tests and proves that the placeholder test harness builds and runs.
+There are no dependencies or behavioral conformance tests yet. `Cargo.lock` and
+the offline Cargo configuration are committed; a vendored source tree is needed
+only when actual dependencies are introduced. The current unit test checks
+nonempty identifiers and descriptions and identifier uniqueness. It does not
+run `cophax`, evaluate a case, or establish conformance, qualification, or
+production evidence.
 
 The [Rust build workflow](.github/workflows/rust-build.yml) builds and runs that
 harness natively on Linux x86_64 GNU and macOS Apple Silicon, recording the
