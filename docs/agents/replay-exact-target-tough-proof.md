@@ -502,6 +502,7 @@ cq_oci_controller() {
     "XDG_CONFIG_HOME=$state/config"
     "XDG_RUNTIME_DIR=$state/runtime"
     "CONTAINERS_CONF=$containers_conf"
+    "PODMAN_NO_PAUSE_PROCESS=1"
     "PATH=/usr/bin:/bin"
   )
   local -a podman_command=(
@@ -822,6 +823,33 @@ PY_CONTROLLER_STDIN
   test "$recorded_status" -eq "$status" || return 125
   return "$status"
 }
+```
+
+### Preserve the task lifecycle
+
+The controller fixes `PODMAN_NO_PAUSE_PROCESS=1` in its scrubbed environment
+for both version and action calls. Every Podman call in this procedure,
+including acquisition, construction, load, execution, wait, and removal, goes
+through this controller. The setting prevents task state from requesting a
+rootless pause process; the required harmless replay and independent host
+observation still establish pinned-runtime and namespace compatibility.
+
+Keep `cq_linux_run`'s ordinary ownership-gated, exactly-once cleanup. An
+unverified owner or an indeterminate or failed controller or removal records
+`reconciliation-required`, withholds completion, retains the exact state, and
+blocks retry until an independent reconciler settles it. SIGKILL, executor
+loss, kernel or host loss, and power loss remain outside in-process cleanup.
+Use fresh controller, phase, boundary, and receipt state for the corrected
+replay, and renew every affected source, runtime, receipt, and review identity.
+
+From the repository root, check the controller environment and receipt
+lifecycle with inert external adapters and a new scratch directory:
+
+```sh
+CQ_LIFECYCLE_CHECK_WORK=${CQ_LIFECYCLE_CHECK_WORK:?set a new scratch directory}
+python3 proofs/exact-target-tough/scripts/check-replay-lifecycle.py \
+  docs/agents/replay-exact-target-tough-proof.md \
+  "$CQ_LIFECYCLE_CHECK_WORK"
 ```
 
 ### Restore the public Linux executor inputs
