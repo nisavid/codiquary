@@ -72,6 +72,25 @@ work.mkdir(parents=True, mode=0o700)
 guide = guide_path.read_text(encoding="utf-8")
 if "\r" in guide:
     fail("guide must use LF line endings")
+lifecycle_start = guide.find("cq_linux_run() (")
+lifecycle_end = guide.find("\n```", lifecycle_start)
+if lifecycle_start < 0 or lifecycle_end < 0:
+    fail("lifecycle code block is absent or malformed")
+lifecycle = guide[lifecycle_start:lifecycle_end]
+identity_fragments = (
+    'local start_controller_identity="$phase_boundary/start-controller-process.json"',
+    '"schema": "io.nisavid.codiquary.start-controller-process/v1"',
+    'if exe != "/usr/bin/bash":',
+    'if read_starttime() != starttime:',
+    '"$boundary_relative/start-controller-process.json"',
+)
+for fragment in identity_fragments:
+    if lifecycle.count(fragment) != 1:
+        fail(f"start-controller process identity contract changed: {fragment}")
+if lifecycle.find('exec {start_stream_fd}<>"$start_stdin_fifo"') > lifecycle.find(
+    '/usr/bin/python3 - "$start_controller_identity"'
+):
+    fail("start-controller identity is captured before FIFO deadlock protection")
 start = guide.find("CQ_PODMAN_SHA256=")
 end = guide.find("\n```", start)
 if start < 0 or end < 0:
@@ -329,6 +348,7 @@ result = {
     },
     "adapted_controller_sha256": hashlib.sha256(controller.encode()).hexdigest(),
     "guide_sha256": digest(guide_path),
+    "process_identity_contract": "separate FIFO and live Bash PID/starttime/UID/exe receipts",
     "received_controller_sha256": received_controller_sha256,
     "result": "passed",
     "scope": (

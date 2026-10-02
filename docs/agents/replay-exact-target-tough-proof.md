@@ -839,6 +839,11 @@ unverified owner or an indeterminate or failed controller or removal records
 `reconciliation-required`, withholds completion, retains the exact state, and
 blocks retry until an independent reconciler settles it. SIGKILL, executor
 loss, kernel or host loss, and power loss remain outside in-process cleanup.
+The attached-start FIFO readiness receipt binds only the FIFO device and inode.
+The caller separately records the live Bash controller's PID, procfs starttime,
+owning UID, and executable before it releases the preflight gate. Later host
+observation and completion consume that process receipt and fail closed on a
+missing, malformed, changed, reused, or surviving identity.
 Use fresh controller, phase, boundary, and receipt state for the corrected
 replay, and renew every affected source, runtime, receipt, and review identity.
 
@@ -5903,6 +5908,61 @@ PY_START_STDIN
   ) > "$preflight_receipt" 2> "$preflight_stderr" &
   start_controller_pid=$!
   exec {start_stream_fd}<>"$start_stdin_fifo" || return 125
+  local start_controller_identity="$phase_boundary/start-controller-process.json"
+  /usr/bin/python3 - "$start_controller_identity" \
+    "$start_controller_pid" <<'PY_START_CONTROLLER_IDENTITY' || return 125
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+output_path = Path(sys.argv[1])
+pid_text = sys.argv[2]
+if re.fullmatch(r"[1-9][0-9]*", pid_text) is None:
+    raise SystemExit("start-controller PID is malformed")
+pid = int(pid_text)
+uid = os.getuid()
+process = Path("/proc") / pid_text
+observed = process.lstat()
+if not stat.S_ISDIR(observed.st_mode) or process.is_symlink() or observed.st_uid != uid:
+    raise SystemExit("start controller is not an own-UID process directory")
+
+
+def read_starttime() -> str:
+    stat_path = process / "stat"
+    stat_observed = stat_path.lstat()
+    if not stat.S_ISREG(stat_observed.st_mode) or stat_path.is_symlink():
+        raise SystemExit("start-controller stat identity is invalid")
+    record = stat_path.read_text(encoding="utf-8")
+    closing = record.rfind(")")
+    fields = record[closing + 2 :].split() if closing >= 0 else []
+    if len(fields) < 20 or re.fullmatch(r"[1-9][0-9]*", fields[19]) is None:
+        raise SystemExit("start-controller starttime is invalid")
+    return fields[19]
+
+
+starttime = read_starttime()
+exe_path = process / "exe"
+if not stat.S_ISLNK(exe_path.lstat().st_mode):
+    raise SystemExit("start-controller executable identity is invalid")
+exe = os.readlink(exe_path)
+if exe != "/usr/bin/bash":
+    raise SystemExit("start-controller executable is not the reviewed Bash")
+if read_starttime() != starttime:
+    raise SystemExit("start-controller identity changed during capture")
+record = {
+    "exe": exe,
+    "pid": pid,
+    "schema": "io.nisavid.codiquary.start-controller-process/v1",
+    "starttime": starttime,
+    "uid": uid,
+}
+with output_path.open("x", encoding="utf-8", newline="\n") as output:
+    output.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+os.chmod(output_path, 0o644)
+PY_START_CONTROLLER_IDENTITY
   local held_gate_status=0
   local readiness_seen=0
   local readiness_attempt
@@ -6328,6 +6388,7 @@ PY_OUTPUT
     "$boundary_relative/start-stdin-expected.bin"
     "$boundary_relative/start-stdin-observed.bin"
     "$boundary_relative/start-controller-ready.txt"
+    "$boundary_relative/start-controller-process.json"
     "$boundary_relative/start-controller-status.txt"
     "$boundary_relative/preflight.txt"
     "$boundary_relative/preflight-stderr.txt"
