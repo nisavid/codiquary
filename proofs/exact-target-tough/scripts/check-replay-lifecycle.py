@@ -98,8 +98,8 @@ if start < 0 or end < 0:
 controller = guide[start:end]
 received_controller_sha256 = hashlib.sha256(controller.encode()).hexdigest()
 accepted_controllers = {
-    "4d515c53184add15481100640b10718b88e09ece727d84d6c7a3878e1effc5d9",
-    "768a992f6c513f6df5de727af0aecd9eafbf4766d7ba06ebec4323d6ba63fa78",
+    "fe30cf9ed9067070532dcc043548cdb624a7fc66e5ddfd49a7b53b260ef43fe6",
+    "f9326942c9e416f11bdb02b7323e203838fd83fe516af44693ce11b339e83272",
 }
 if received_controller_sha256 not in accepted_controllers:
     fail("controller bytes differ from the reviewed final or no-pause-removed form")
