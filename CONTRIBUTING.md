@@ -31,6 +31,22 @@ explicit about what their evidence proves.
 If Cocogitto is installed, `cog install-hook --all` installs the checked-in
 commit-message and pre-push hooks.
 
+Repository policy requires Python 3.9 or newer and the pinned YAML parser.
+Prepare and activate the tooling environment before running the policy check
+or pre-push hook:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r scripts/requirements-policy.txt
+python -m unittest discover -s scripts -p 'test_*.py' -v
+```
+
+Installation verifies the recorded wheel hashes and permits no source builds.
+The policy check itself performs no network access. See
+[workflow action pins](docs/repository-controls/workflow-action-pins.md) for
+accepted references, YAML handling, and the check's evidence boundary.
+
 ## Scope and evidence
 
 - Keep production keys, credentials, provider resources, host bindings,
