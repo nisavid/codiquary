@@ -92,10 +92,14 @@ harness natively on Linux x86_64 GNU and macOS Apple Silicon, recording the
 actual compiler and runner versions. These are build checks, not minimum-OS
 qualification, reproducible-genesis evidence, or an authenticated release.
 
-Run the language-neutral repository checks:
+Run the repository-policy checks (Python 3.10 or newer):
 
 ```sh
+python3 -m venv .venv-policy
+. .venv-policy/bin/activate
+python3 -m pip install -r scripts/requirements-policy.txt
 ./scripts/check-repository.sh
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
 ```
 
 These checks validate repository policy only. They do not prove a release

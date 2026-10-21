@@ -25,8 +25,24 @@ explicit about what their evidence proves.
    Bot; the Bot exemption does not identify or authenticate the pusher. See
    [DCO repository control](docs/repository-controls/dco.md) for the enforced
    matching rules, evidence boundary, and rollout state.
-6. Run `./scripts/check-repository.sh`, `git diff --check`, and every focused
-   test or conformance suite for the changed surface.
+6. Prepare the repository-policy tools with Python 3.10 or newer:
+
+   ```sh
+   python3 -m venv .venv-policy
+   . .venv-policy/bin/activate
+   python3 -m pip install -r scripts/requirements-policy.txt
+   ```
+
+   Keep that environment active when running the pre-push hook. Run
+   `./scripts/check-repository.sh`, `git diff --check`, and every focused test
+   or conformance suite for the changed surface. Workflow-policy regressions:
+
+   ```sh
+   python3 -m unittest discover -s scripts -p 'test_*.py' -v
+   ```
+
+   See [workflow action pins](docs/repository-controls/workflow-action-pins.md)
+   for the supported references and YAML forms.
 
 If Cocogitto is installed, `cog install-hook --all` installs the checked-in
 commit-message and pre-push hooks.

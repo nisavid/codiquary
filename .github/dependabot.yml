@@ -31,3 +31,15 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:30"
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - needs-triage

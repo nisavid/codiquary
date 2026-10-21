@@ -23,5 +23,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install repository-policy dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/repository-policy-venv"
+          "$RUNNER_TEMP/repository-policy-venv/bin/python" -m pip install -r scripts/requirements-policy.txt
+          echo "$RUNNER_TEMP/repository-policy-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Test workflow reference validation
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
       - name: Validate repository policy
         run: ./scripts/check-repository.sh

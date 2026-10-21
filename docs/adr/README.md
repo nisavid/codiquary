@@ -10,3 +10,7 @@ Accepted records:
 
 The provenance handoff links the pre-repository decisions that constrain the
 genesis work.
+
+Proposed records:
+
+- [ADR 0002: Parse workflow action references before checking pins](0002-parse-workflow-action-references.md)
