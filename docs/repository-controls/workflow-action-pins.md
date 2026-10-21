@@ -12,9 +12,12 @@ the check.
 Every external action in a job's steps (including `parallel` groups and
 background steps) and reusable workflow at `jobs.<job>.uses` must have an `owner/repository[/path]@<sha>` reference with
 exactly 40 lowercase hexadecimal SHA characters. This preserves the existing
-pin requirement. Local references (`./` and `$/`), Docker references, and
-expressions remain unsupported; supporting them requires a separate policy
-decision, including how their transitive dependencies are checked.
+pin requirement. Local references (`./`), self-repository references (`$/`),
+Docker references (`docker://...`), and expressions (`${{ ... }}`) remain
+unsupported; supporting them requires a separate policy decision, including how
+their transitive dependencies are checked. GitHub defines `$/` in its
+[workflow action-reference syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsuses);
+rejecting it here is a repository policy restriction, not invalid GitHub syntax.
 
 The checker parses all top-level `.yml` and `.yaml` files in
 `.github/workflows`. It supports block and flow mappings, quoted and escaped

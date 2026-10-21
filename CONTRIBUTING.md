@@ -34,8 +34,10 @@ explicit about what their evidence proves.
    ```
 
    Keep that environment active when running the pre-push hook. Run
-   `./scripts/check-repository.sh`, `git diff --check`, and every focused test
-   or conformance suite for the changed surface. Workflow-policy regressions:
+   `./scripts/check-repository.sh`, `git diff --check HEAD` (staged and unstaged
+   changes), and every focused test or conformance suite for the changed surface.
+   For a committed revision, use `git diff --check HEAD^ HEAD`. Workflow-policy
+   regressions:
 
    ```sh
    python3 -m unittest discover -s scripts -p 'test_*.py' -v

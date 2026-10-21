@@ -19,8 +19,8 @@ Parse workflow representation nodes with PyYAML's `BaseLoader` and validate
 all step and job `uses` values, including actions inside `parallel` groups. Do not construct arbitrary objects. Inspect the
 representation graph before lookup, rejecting ambiguous or unsupported input.
 Resolve nonrecursive aliases without repeatedly expanding shared nodes, reject
-cycles and merge keys, and handle property names without ASCII case. Require
-exact full lowercase commit SHAs for external references.
+cycles and merge keys, and compare property names case-insensitively for ASCII
+characters. Require exact full lowercase commit SHAs for external references.
 
 Keep this policy under `scripts/`, outside the non-operational Rust release
 implementation. Provision the pinned parser dependency explicitly in CI and
