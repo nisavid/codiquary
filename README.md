@@ -82,7 +82,7 @@ cargo build --frozen
 cargo test --frozen
 ```
 
-There are no dependencies or behavioral tests yet. `Cargo.lock` and the offline
+The Rust package has no dependencies or behavioral tests yet. `Cargo.lock` and the offline
 Cargo configuration are committed; a vendored source tree is needed only when
 actual dependencies are introduced. A successful test run currently reports
 zero tests and proves that the placeholder test harness builds and runs.
@@ -92,10 +92,12 @@ harness natively on Linux x86_64 GNU and macOS Apple Silicon, recording the
 actual compiler and runner versions. These are build checks, not minimum-OS
 qualification, reproducible-genesis evidence, or an authenticated release.
 
-Run the language-neutral repository checks:
+Prepare the Python tooling environment described in
+[CONTRIBUTING.md](CONTRIBUTING.md), then run the repository checks:
 
 ```sh
 ./scripts/check-repository.sh
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
 ```
 
 These checks validate repository policy only. They do not prove a release

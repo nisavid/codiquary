@@ -44,14 +44,7 @@ for path in scripts/check-repository.sh .hooks/commit-msg.sh .hooks/pre-push.sh;
   fi
 done
 
-unpinned=0
-while IFS= read -r line; do
-  if [[ ! "$line" =~ uses:[[:space:]]+[^[:space:]@]+@[0-9a-f]{40}([[:space:]]|$) ]]; then
-    printf 'GitHub Action is not pinned to a full commit SHA: %s\n' "$line" >&2
-    unpinned=1
-  fi
-done < <(grep -R -h -E '^[[:space:]]*uses:' .github/workflows || true)
-(( unpinned == 0 )) || exit 1
+python3 scripts/check_workflow_pins.py .github/workflows
 
 if git grep -nI $'\r' -- . ':!LICENSE' ':!NOTICE'; then
   printf 'carriage returns found in tracked text\n' >&2

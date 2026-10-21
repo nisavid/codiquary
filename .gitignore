@@ -5,3 +5,5 @@
 .env.*
 !.env.example
 /target/
+/.venv/
+__pycache__/
