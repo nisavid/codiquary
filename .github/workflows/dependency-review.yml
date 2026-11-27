@@ -24,6 +24,10 @@ jobs:
           fail-on-severity: low
           retry-on-snapshot-warnings: true
 
+      - name: Fail this job to verify its gate
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'nisavid/gate-negative-test'
+        run: exit 1
+
   required:
     name: Dependency review gate
     needs: [dependency-review]

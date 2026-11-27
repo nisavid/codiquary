@@ -30,6 +30,10 @@ jobs:
         with:
           command: check
 
+      - name: Reject a malformed sample subject
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'nisavid/gate-negative-test'
+        run: cog verify 'Verify the PR gates reject failed jobs'
+
   required:
     name: Conventional commits gate
     needs: [conventional-commits]
