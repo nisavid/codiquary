@@ -47,10 +47,6 @@ jobs:
         with:
           category: /language:${{ matrix.language }}
 
-      - name: Fail this job to verify its gate
-        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'nisavid/gate-negative-test' && matrix.language == 'actions'
-        run: exit 1
-
   required:
     name: CodeQL analysis gate
     needs: [analyze]

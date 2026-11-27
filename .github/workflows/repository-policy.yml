@@ -36,10 +36,6 @@ jobs:
       - name: Validate repository policy
         run: ./scripts/check-repository.sh
 
-      - name: Fail this job to verify its gate
-        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref == 'nisavid/gate-negative-test'
-        run: exit 1
-
   required:
     name: Repository policy gate
     needs: [repository-policy]
